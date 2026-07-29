@@ -1,6 +1,6 @@
 # cleaning
 
-Отдельный backend AI Cleaning Ecosystem: TypeScript, Fastify, PostgreSQL и Prisma.
+Отдельный backend AI Cleaning Ecosystem: TypeScript, Fastify, PostgreSQL, Prisma и OpenAI Responses API.
 
 ## Что находится в репозитории
 
@@ -8,6 +8,7 @@
 - Prisma-схема, миграции и seed — `apps/api/prisma`
 - OpenAPI-контракт — `apps/api/openapi.yaml`
 - общий модуль расчёта цены и scoring — `packages/shared`
+- AI Quality/Vision, Risk, Forecast и Review NLP — `apps/api/src/ai.ts`
 
 ## Локальный запуск
 
@@ -60,10 +61,15 @@ ENABLE_DEMO_LOGIN=false
 CORS_ORIGIN=https://ваш-разрешённый-домен
 SESSION_TTL_DAYS=30
 MAX_PROOF_BYTES=10485760
-REQUEST_BODY_LIMIT_BYTES=15728640
+REQUEST_BODY_LIMIT_BYTES=26214400
 PAYOUT_RATIO=0.72
+OPENAI_API_KEY=<новый секретный серверный ключ>
+OPENAI_MODEL=gpt-5.6-sol
+OPENAI_TIMEOUT_MS=45000
 ```
 
-Фотодоказательства MVP сохраняются в `apps/api/storage`. Чтобы они не исчезали после перезапуска сервиса, подключите Persistent Disk к `/opt/render/project/src/apps/api/storage`.
+Фото и MP4-доказательства MVP сохраняются в `apps/api/storage`. Для MP4 Android передаёт три репрезентативных JPEG-кадра для Vision-анализа. Чтобы медиа не исчезало после перезапуска сервиса, подключите Persistent Disk к `/opt/render/project/src/apps/api/storage`.
+
+Если `OPENAI_API_KEY` не задан или провайдер временно недоступен, API продолжит работу в явно помеченном режиме `FALLBACK`. Этот режим не выдаётся за анализ содержимого фотографии. Финальное решение контроля качества всегда принимает менеджер.
 
 Не добавляйте настоящие `.env`-файлы и секреты в Git.

@@ -13,7 +13,9 @@ export const appConfig = {
   sessionTtlDays: numberFromEnv("SESSION_TTL_DAYS", 30),
   maxProofBytes: numberFromEnv("MAX_PROOF_BYTES", 10 * 1024 * 1024),
   payoutRatio: numberFromEnv("PAYOUT_RATIO", 0.72),
-  requestBodyLimitBytes: numberFromEnv("REQUEST_BODY_LIMIT_BYTES", 15 * 1024 * 1024)
+  requestBodyLimitBytes: numberFromEnv("REQUEST_BODY_LIMIT_BYTES", 25 * 1024 * 1024),
+  openAiModel: process.env.OPENAI_MODEL?.trim() || "gpt-5.6-sol",
+  openAiTimeoutMs: numberFromEnv("OPENAI_TIMEOUT_MS", 45_000)
 };
 
 if (appConfig.sessionTtlDays <= 0) {
@@ -26,6 +28,10 @@ if (appConfig.maxProofBytes <= 0 || appConfig.maxProofBytes > 10 * 1024 * 1024) 
 
 if (appConfig.payoutRatio <= 0 || appConfig.payoutRatio >= 1) {
   throw new Error("PAYOUT_RATIO must be between 0 and 1");
+}
+
+if (appConfig.openAiTimeoutMs < 5_000 || appConfig.openAiTimeoutMs > 120_000) {
+  throw new Error("OPENAI_TIMEOUT_MS must be between 5000 and 120000");
 }
 
 export function isProduction() {

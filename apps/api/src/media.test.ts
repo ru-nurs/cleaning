@@ -3,6 +3,7 @@ import test from "node:test";
 import { ApiError } from "./errors.js";
 import {
   decodeAndValidateProofImage,
+  decodeAndValidateProofMedia,
   extensionForProofMimeType
 } from "./media.js";
 
@@ -28,4 +29,15 @@ test("declared MIME type must match the actual image", () => {
     () => decodeAndValidateProofImage(onePixelPng, "image/jpeg"),
     (error) => error instanceof ApiError && error.code === "PROOF_MIME_MISMATCH"
   );
+});
+
+test("a valid MP4 proof is accepted and receives an mp4 extension", () => {
+  const mp4Header = Buffer.from([
+    0x00, 0x00, 0x00, 0x0c,
+    0x66, 0x74, 0x79, 0x70,
+    0x69, 0x73, 0x6f, 0x6d
+  ]).toString("base64");
+  const result = decodeAndValidateProofMedia(mp4Header, "video/mp4");
+  assert.equal(result.mimeType, "video/mp4");
+  assert.equal(extensionForProofMimeType(result.mimeType), ".mp4");
 });

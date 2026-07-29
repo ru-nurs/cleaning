@@ -4,7 +4,8 @@ info:
   version: 0.1.0
   description: |
     Contract for the native Android MVP. Money values are integer RUB.
-    AI pricing and matching are deterministic, explainable scoring rules.
+    Quality Vision, Risk, Forecast and Review NLP use OpenAI Responses API when configured.
+    Every AI module returns an explicit OPENAI or FALLBACK mode and remains advisory.
 servers:
   - url: http://localhost:4000
     description: Local development
@@ -17,6 +18,7 @@ tags:
   - name: Notifications
   - name: Operations
   - name: Reviews
+  - name: AI
 paths:
   /health:
     get:
@@ -34,6 +36,17 @@ paths:
                 properties:
                   ok: { type: boolean, const: true }
                   service: { type: string }
+  /ai/status:
+    get:
+      tags: [AI]
+      summary: Inspect AI configuration without exposing credentials
+      operationId: getAiStatus
+      responses:
+        "200":
+          description: AI module status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AiStatus" }
   /catalog/services:
     get:
       tags: [System]
@@ -395,7 +408,8 @@ paths:
   /quality/proof:
     post:
       tags: [Quality]
-      summary: Submit executor checklist and proof image
+      summary: Submit executor checklist and proof photo or MP4 video
+      description: MP4 is analysed through representative JPEG frames extracted on the device.
       operationId: submitProof
       security: [{ bearerAuth: [] }]
       requestBody:
@@ -410,11 +424,17 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [proof, qualityCheck, order]
+                required: [proof, qualityCheck, order, aiAnalysis]
                 properties:
                   proof: { $ref: "#/components/schemas/ProofAsset" }
                   qualityCheck: { $ref: "#/components/schemas/QualityCheck" }
                   order: { $ref: "#/components/schemas/Order" }
+                  aiAnalysis:
+                    type: object
+                    required: [quality, risk]
+                    properties:
+                      quality: { $ref: "#/components/schemas/QualityVisionResult" }
+                      risk: { $ref: "#/components/schemas/RiskResult" }
         "400": { $ref: "#/components/responses/Error" }
         "413": { $ref: "#/components/responses/Error" }
         "415": { $ref: "#/components/responses/Error" }
@@ -452,6 +472,31 @@ paths:
                   order: { $ref: "#/components/schemas/Order" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /quality/{orderId}/ai-analysis:
+    get:
+      tags: [Quality, AI]
+      summary: Get the latest AI Quality and Risk events for an order
+      operationId: getQualityAiAnalysis
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: orderId
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Latest persisted AI events
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [orderId, quality, risk]
+                properties:
+                  orderId: { type: string }
+                  quality: { oneOf: [{ $ref: "#/components/schemas/AiEvent" }, { type: "null" }] }
+                  risk: { oneOf: [{ $ref: "#/components/schemas/AiEvent" }, { type: "null" }] }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /reviews:
     post:
       tags: [Reviews]
@@ -477,11 +522,61 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [review]
+                required: [review, nlp]
                 properties:
                   review: { $ref: "#/components/schemas/Review" }
+                  nlp: { $ref: "#/components/schemas/ReviewNlpResult" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /ai/risk/{orderId}:
+    post:
+      tags: [AI, Operations]
+      summary: Recalculate operational risk for an order
+      operationId: assessOrderRisk
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: orderId
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Risk recommendation and persisted event id
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [risk, eventId]
+                properties:
+                  risk: { $ref: "#/components/schemas/RiskResult" }
+                  eventId: { type: string }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /ai/forecast:
+    post:
+      tags: [AI, Operations]
+      summary: Forecast demand and recommended staffing
+      operationId: forecastDemand
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                horizonDays: { type: integer, minimum: 1, maximum: 31, default: 7 }
+      responses:
+        "200":
+          description: Demand forecast and persisted event id
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [forecast, eventId]
+                properties:
+                  forecast: { $ref: "#/components/schemas/DemandForecastResult" }
+                  eventId: { type: string }
+        "403": { $ref: "#/components/responses/Error" }
   /notifications/{userId}:
     get:
       tags: [Notifications]
@@ -691,6 +786,144 @@ components:
         priceTotal: { type: integer }
         complexityScore: { type: integer, minimum: 0, maximum: 100 }
         version: { type: integer }
+    AiStatus:
+      type: object
+      required: [enabled, provider, model, modules, videoAnalysis, decisionPolicy]
+      properties:
+        enabled: { type: boolean }
+        provider: { type: string, const: openai }
+        model: { type: string }
+        modules:
+          type: array
+          items: { type: string, enum: [QUALITY_VISION, ORDER_RISK, DEMAND_FORECAST, REVIEW_NLP] }
+        videoAnalysis: { type: string, const: REPRESENTATIVE_FRAMES }
+        decisionPolicy: { type: string, const: AI_RECOMMENDATION_WITH_HUMAN_APPROVAL }
+    AiEvent:
+      type: object
+      required: [id, module, input, output, explanation, createdAt]
+      properties:
+        id: { type: string }
+        orderId: { type: [string, "null"] }
+        module: { type: string }
+        input: { type: object, additionalProperties: true }
+        output: { type: object, additionalProperties: true }
+        explanation:
+          type: array
+          items: { type: string }
+        createdAt: { type: string, format: date-time }
+    QualityVisionResult:
+      type: object
+      required: [mode, provider, model, latencyMs, data, warning]
+      properties:
+        mode: { type: string, enum: [OPENAI, FALLBACK] }
+        provider: { type: string, enum: [openai, local-rules] }
+        model: { type: string }
+        latencyMs: { type: integer, minimum: 0 }
+        warning: { type: [string, "null"] }
+        data:
+          type: object
+          required: [score, confidence, summary, detectedIssues, reworkRecommended, checklistAssessment, recommendations, riskSignals]
+          properties:
+            score: { type: integer, minimum: 0, maximum: 100 }
+            confidence: { type: number, minimum: 0, maximum: 1 }
+            summary: { type: string }
+            detectedIssues:
+              type: array
+              items: { type: string }
+            reworkRecommended: { type: boolean }
+            checklistAssessment:
+              type: array
+              items:
+                type: object
+                required: [item, status, evidence]
+                properties:
+                  item: { type: string }
+                  status: { type: string, enum: [PASS, FAIL, UNCLEAR] }
+                  evidence: { type: string }
+            recommendations:
+              type: array
+              items: { type: string }
+            riskSignals:
+              type: array
+              items: { type: string }
+    RiskResult:
+      type: object
+      required: [mode, provider, model, latencyMs, data, warning]
+      properties:
+        mode: { type: string, enum: [OPENAI, FALLBACK] }
+        provider: { type: string, enum: [openai, local-rules] }
+        model: { type: string }
+        latencyMs: { type: integer, minimum: 0 }
+        warning: { type: [string, "null"] }
+        data:
+          type: object
+          required: [score, level, summary, reasons, recommendedActions]
+          properties:
+            score: { type: integer, minimum: 0, maximum: 100 }
+            level: { type: string, enum: [LOW, MEDIUM, HIGH, CRITICAL] }
+            summary: { type: string }
+            reasons:
+              type: array
+              items: { type: string }
+            recommendedActions:
+              type: array
+              items: { type: string }
+    DemandForecastResult:
+      type: object
+      required: [mode, provider, model, latencyMs, data, warning]
+      properties:
+        mode: { type: string, enum: [OPENAI, FALLBACK] }
+        provider: { type: string, enum: [openai, local-rules] }
+        model: { type: string }
+        latencyMs: { type: integer, minimum: 0 }
+        warning: { type: [string, "null"] }
+        data:
+          type: object
+          required: [summary, days, risks, staffingRecommendations]
+          properties:
+            summary: { type: string }
+            days:
+              type: array
+              items:
+                type: object
+                required: [date, predictedOrders, lowerBound, upperBound, confidence, recommendedExecutors]
+                properties:
+                  date: { type: string, format: date }
+                  predictedOrders: { type: integer, minimum: 0 }
+                  lowerBound: { type: integer, minimum: 0 }
+                  upperBound: { type: integer, minimum: 0 }
+                  confidence: { type: number, minimum: 0, maximum: 1 }
+                  recommendedExecutors: { type: integer, minimum: 0 }
+            risks:
+              type: array
+              items: { type: string }
+            staffingRecommendations:
+              type: array
+              items: { type: string }
+    ReviewNlpResult:
+      type: object
+      required: [mode, provider, model, latencyMs, data, warning]
+      properties:
+        mode: { type: string, enum: [OPENAI, FALLBACK] }
+        provider: { type: string, enum: [openai, local-rules] }
+        model: { type: string }
+        latencyMs: { type: integer, minimum: 0 }
+        warning: { type: [string, "null"] }
+        data:
+          type: object
+          required: [sentiment, sentimentScore, urgency, summary, topics, qualitySignals, recommendedAction]
+          properties:
+            sentiment: { type: string, enum: [POSITIVE, NEUTRAL, NEGATIVE] }
+            sentimentScore: { type: number, minimum: -1, maximum: 1 }
+            urgency: { type: string, enum: [LOW, MEDIUM, HIGH] }
+            summary: { type: string }
+            topics:
+              type: array
+              items: { type: string }
+            qualitySignals:
+              type: array
+              items: { type: string }
+            recommendedAction: { type: string }
     Payment:
       type: object
       required: [id, orderId, amount, status, kind, createdAt]
@@ -711,7 +944,7 @@ components:
       properties:
         id: { type: string }
         orderId: { type: string }
-        kind: { type: string, const: PHOTO_FILE }
+        kind: { type: string, enum: [PHOTO_FILE, VIDEO_FILE] }
         uri: { type: string }
         notes: { type: [string, "null"] }
         createdAt: { type: string, format: date-time }
@@ -837,7 +1070,15 @@ components:
         fileName: { type: string, maxLength: 120 }
         mimeType:
           type: string
-          enum: [image/jpeg, image/png, image/webp]
+          enum: [image/jpeg, image/png, image/webp, video/mp4]
+        analysisFramesBase64:
+          type: array
+          maxItems: 5
+          description: Required for MP4. Representative frames encoded as JPEG base64.
+          items:
+            type: string
+            contentEncoding: base64
+            maxLength: 2000000
         notes: { type: string, maxLength: 500 }
         checklist:
           type: array

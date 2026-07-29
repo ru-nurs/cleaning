@@ -11,7 +11,7 @@
     "start": "tsx src/server.ts",
     "build": "prisma generate && tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/domain.test.ts src/media.test.ts src/scoring.test.ts src/server.contract.test.ts src/migration.contract.test.ts src/e2e.test.ts",
+    "test": "tsx --test src/ai.test.ts src/domain.test.ts src/media.test.ts src/scoring.test.ts src/server.contract.test.ts src/migration.contract.test.ts src/e2e.test.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",

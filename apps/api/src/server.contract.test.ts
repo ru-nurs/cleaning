@@ -12,6 +12,11 @@ test("health and validation failures use stable response contracts", async () =>
   assert.equal(health.statusCode, 200);
   assert.deepEqual(health.json(), { ok: true, service: "ai-cleaning-api" });
 
+  const aiStatus = await app.inject({ method: "GET", url: "/ai/status" });
+  assert.equal(aiStatus.statusCode, 200);
+  assert.equal(typeof aiStatus.json().enabled, "boolean");
+  assert.ok(aiStatus.json().modules.includes("QUALITY_VISION"));
+
   const invalid = await app.inject({ method: "GET", url: "/geo/geocode?address=x" });
   assert.equal(invalid.statusCode, 400);
   assert.equal(invalid.json().error.code, "VALIDATION_ERROR");

@@ -26,7 +26,14 @@ import {
   TransitionContext
 } from "./domain.js";
 import { apiError, installErrorHandling } from "./errors.js";
-import { decodeAndValidateProofImage, extensionForProofMimeType } from "./media.js";
+import {
+  analyzeQualityVision,
+  analyzeReview,
+  assessOrderRisk,
+  forecastDemand,
+  getAiStatus
+} from "./ai.js";
+import { decodeAndValidateProofImage, decodeAndValidateProofMedia, extensionForProofMimeType } from "./media.js";
 
 export const prisma = new PrismaClient();
 export const app = Fastify({
@@ -118,9 +125,18 @@ const submitProofSchema = z.object({
   photoUri: z.string().min(3),
   photoBase64: z.string().min(4).max(14_000_000),
   fileName: z.string().max(120).optional(),
-  mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
+  mimeType: z.enum(["image/jpeg", "image/png", "image/webp", "video/mp4"]),
+  analysisFramesBase64: z.array(z.string().min(4).max(2_000_000)).max(5).default([]),
   notes: z.string().max(500).optional(),
   checklist: z.array(z.string().min(1).max(120)).min(1).max(30)
+}).superRefine((value, context) => {
+  if (value.mimeType === "video/mp4" && value.analysisFramesBase64.length === 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["analysisFramesBase64"],
+      message: "At least one representative frame is required for video analysis"
+    });
+  }
 });
 
 const completeQualitySchema = z.object({
@@ -144,6 +160,10 @@ const createReviewSchema = z.object({
   comment: z.string().max(500).optional()
 });
 
+const forecastRequestSchema = z.object({
+  horizonDays: z.number().int().min(1).max(31).default(7)
+});
+
 const publicUserSelect = {
   id: true,
   name: true,
@@ -161,7 +181,12 @@ const publicOrderInclude = {
   executor: { select: publicUserSelect },
   service: true,
   qualityChecks: true,
-  payments: true
+  payments: true,
+  aiEvents: {
+    where: { module: { in: ["QUALITY_VISION", "ORDER_RISK"] } },
+    orderBy: { createdAt: "desc" },
+    take: 4
+  }
 } satisfies Prisma.OrderInclude;
 
 function publicUser(user: { id: string; name: string; email: string | null; phone: string | null; role: Role; rating: number; distanceKm: number; activeOrders: number; completedOrders: number }) {
@@ -262,9 +287,9 @@ async function saveProofMedia(input: {
   photoUri: string;
   photoBase64: string;
   fileName?: string;
-  mimeType: "image/jpeg" | "image/png" | "image/webp";
+  mimeType: "image/jpeg" | "image/png" | "image/webp" | "video/mp4";
 }) {
-  const { buffer, mimeType } = decodeAndValidateProofImage(
+  const { buffer, mimeType } = decodeAndValidateProofMedia(
     input.photoBase64,
     input.mimeType
   );
@@ -274,11 +299,16 @@ async function saveProofMedia(input: {
   await writeFile(new URL(fileName, proofStorageDir), buffer);
 
   return {
-    kind: "PHOTO_FILE",
+    kind: mimeType === "video/mp4" ? "VIDEO_FILE" : "PHOTO_FILE",
     uri: `storage://proofs/${fileName}`,
     stored: true,
-    sizeBytes: buffer.length
+    sizeBytes: buffer.length,
+    mimeType
   };
+}
+
+function jsonValue(value: unknown) {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
 
 function pseudoCoordinateOffset(address: string, salt: number) {
@@ -381,6 +411,10 @@ async function createNotification(input: {
 
 app.get("/health", async () => {
   return { ok: true, service: "ai-cleaning-api" };
+});
+
+app.get("/ai/status", async () => {
+  return getAiStatus();
 });
 
 app.get("/geo/geocode", async (request) => {
@@ -581,7 +615,10 @@ app.post("/reviews", async (request) => {
   requireAnyRole(user, [Role.CLIENT]);
   const input = createReviewSchema.parse(request.body);
   assertSelfOrRole(user, input.clientId, []);
-  const order = await prisma.order.findUnique({ where: { id: input.orderId } });
+  const order = await prisma.order.findUnique({
+    where: { id: input.orderId },
+    include: { service: true }
+  });
   if (!order) throw apiError("ORDER_NOT_FOUND", "Order not found", 404);
   if (order.clientId !== input.clientId) {
     throw apiError("ORDER_FORBIDDEN", "Client does not own order", 403);
@@ -631,6 +668,27 @@ app.post("/reviews", async (request) => {
     });
   }
 
+  const nlp = await analyzeReview({
+    reviewId: review.id,
+    orderId: order.id,
+    rating: review.rating,
+    comment: review.comment ?? undefined,
+    serviceTitle: order.service.title
+  });
+  await prisma.aiEvent.create({
+    data: {
+      orderId: order.id,
+      module: "REVIEW_NLP",
+      input: {
+        reviewId: review.id,
+        rating: review.rating,
+        hasComment: Boolean(review.comment)
+      },
+      output: jsonValue(nlp),
+      explanation: [nlp.data.summary, nlp.data.recommendedAction]
+    }
+  });
+
   await prisma.auditEvent.create({
     data: {
       actorId: input.clientId,
@@ -648,7 +706,7 @@ app.post("/reviews", async (request) => {
     metadata: { orderId: order.id, reviewId: review.id, rating: review.rating }
   });
 
-  return { review };
+  return { review, nlp };
 });
 
 app.get("/operations/dashboard", async (request) => {
@@ -1281,7 +1339,19 @@ app.post("/quality/proof", async (request) => {
   const user = await requireUser(request);
   requireAnyRole(user, [Role.EXECUTOR]);
   const input = submitProofSchema.parse(request.body);
-  const order = await prisma.order.findUnique({ where: { id: input.orderId } });
+  const order = await prisma.order.findUnique({
+    where: { id: input.orderId },
+    include: {
+      service: true,
+      executor: {
+        select: {
+          rating: true,
+          activeOrders: true,
+          completedOrders: true
+        }
+      }
+    }
+  });
   if (!order) throw apiError("ORDER_NOT_FOUND", "Order not found", 404);
   if (order.executorId !== user.id || (input.executorId && input.executorId !== user.id)) {
     throw apiError(
@@ -1302,7 +1372,46 @@ app.post("/quality/proof", async (request) => {
     mimeType: input.mimeType
   });
 
-  const checklistScore = Math.min(100, 70 + input.checklist.length * 6 + 14);
+  const analysisImages =
+    storedMedia.mimeType === "video/mp4"
+      ? input.analysisFramesBase64.map((frame) => {
+          const validated = decodeAndValidateProofImage(frame, "image/jpeg");
+          return `data:${validated.mimeType};base64,${validated.buffer.toString("base64")}`;
+        })
+      : [`data:${storedMedia.mimeType};base64,${input.photoBase64.replace(/\s+/g, "")}`];
+
+  const vision = await analyzeQualityVision({
+    orderId: order.id,
+    serviceTitle: order.service.title,
+    checklist: input.checklist,
+    notes: input.notes,
+    mediaType: storedMedia.mimeType,
+    images: analysisImages
+  });
+  const [previousDisputes, clientReviewStats, clientOrderCount] = await Promise.all([
+    prisma.dispute.count({ where: { orderId: order.id } }),
+    prisma.review.aggregate({
+      where: { clientId: order.clientId },
+      _avg: { rating: true }
+    }),
+    prisma.order.count({ where: { clientId: order.clientId } })
+  ]);
+  const risk = await assessOrderRisk({
+    orderId: order.id,
+    status: order.status,
+    urgent: order.urgent,
+    complexityScore: order.complexityScore,
+    priceTotal: order.priceTotal,
+    hasExecutor: Boolean(order.executorId),
+    executorActiveOrders: order.executor?.activeOrders,
+    executorRating: order.executor?.rating,
+    executorCompletedOrders: order.executor?.completedOrders,
+    clientOrderCount,
+    clientAverageRating: clientReviewStats._avg.rating ?? undefined,
+    previousDisputes,
+    vision: vision.data
+  });
+  const checklistScore = vision.data.score;
   const result = await prisma.$transaction(async (tx) => {
     const proof = await tx.proofAsset.create({
       data: {
@@ -1317,8 +1426,48 @@ app.post("/quality/proof", async (request) => {
         orderId: order.id,
         status: QualityCheckStatus.PENDING_REVIEW,
         score: checklistScore,
-        notes: input.notes ?? "Proof submitted by performer"
+        notes: vision.data.summary
       }
+    });
+    await tx.aiEvent.createMany({
+      data: [
+        {
+          orderId: order.id,
+          module: "QUALITY_VISION",
+          input: {
+            checklist: input.checklist,
+            mediaType: storedMedia.mimeType,
+            frameCount: analysisImages.length,
+            hasNotes: Boolean(input.notes)
+          },
+          output: jsonValue(vision),
+          explanation: [
+            vision.data.summary,
+            ...vision.data.detectedIssues,
+            ...vision.data.recommendations
+          ]
+        },
+        {
+          orderId: order.id,
+          module: "ORDER_RISK",
+          input: {
+            status: order.status,
+            urgent: order.urgent,
+            complexityScore: order.complexityScore,
+            previousDisputes,
+            clientOrderCount,
+            clientAverageRating: clientReviewStats._avg.rating,
+            executorActiveOrders: order.executor?.activeOrders ?? null,
+            qualityVisionMode: vision.mode
+          },
+          output: jsonValue(risk),
+          explanation: [
+            risk.data.summary,
+            ...risk.data.reasons,
+            ...risk.data.recommendedActions
+          ]
+        }
+      ]
     });
     await applyOrderTransition(tx, {
       order,
@@ -1350,7 +1499,18 @@ app.post("/quality/proof", async (request) => {
           proofId: proof.id,
           qualityCheckId: qualityCheck.id,
           checklist: input.checklist,
-          media: { uri: proof.uri, kind: proof.kind, sizeBytes: storedMedia.sizeBytes }
+          media: {
+            uri: proof.uri,
+            kind: proof.kind,
+            sizeBytes: storedMedia.sizeBytes,
+            mimeType: storedMedia.mimeType,
+            frameCount: analysisImages.length
+          },
+          ai: {
+            qualityMode: vision.mode,
+            qualityScore: vision.data.score,
+            riskLevel: risk.data.level
+          }
         }
       }
     });
@@ -1367,19 +1527,39 @@ app.post("/quality/proof", async (request) => {
       userId: order.clientId,
       type: "QUALITY_CHECK",
       title: "Заказ передан на контроль качества",
-      body: `По заказу ${order.id} отправлен фотоотчёт.`,
-      metadata: { orderId: order.id, qualityCheckId: qualityCheck.id, proofId: proof.id }
+      body: `По заказу ${order.id} отправлен медиаотчёт. AI Quality: ${vision.data.score}/100.`,
+      metadata: {
+        orderId: order.id,
+        qualityCheckId: qualityCheck.id,
+        proofId: proof.id,
+        aiMode: vision.mode,
+        aiScore: vision.data.score
+      }
     }),
     createNotification({
       userId: order.executorId,
       type: "PROOF_SUBMITTED",
-      title: "Фотоотчёт отправлен",
-      body: `Ваш фотоотчёт по заказу ${order.id} сохранён.`,
-      metadata: { orderId: order.id, qualityCheckId: qualityCheck.id, proofId: proof.id }
+      title: "Медиаотчёт отправлен",
+      body: `Ваш отчёт по заказу ${order.id} сохранён. Предварительная AI-оценка: ${vision.data.score}/100.`,
+      metadata: {
+        orderId: order.id,
+        qualityCheckId: qualityCheck.id,
+        proofId: proof.id,
+        aiMode: vision.mode,
+        aiScore: vision.data.score
+      }
     })
   ]);
 
-  return { proof, qualityCheck, order: updatedOrder };
+  return {
+    proof,
+    qualityCheck,
+    order: updatedOrder,
+    aiAnalysis: {
+      quality: vision,
+      risk
+    }
+  };
 });
 
 app.post("/quality/:orderId/complete", async (request) => {
@@ -1495,6 +1675,156 @@ app.get("/performer/tasks/:executorId", async (request) => {
     orderBy: { updatedAt: "desc" },
     include: { service: true, client: { select: publicUserSelect } }
   });
+});
+
+app.get("/quality/:orderId/ai-analysis", async (request) => {
+  const user = await requireUser(request);
+  requireAnyRole(user, [...QUALITY_ROLES, ...OPERATION_ROLES]);
+  const { orderId } = request.params as { orderId: string };
+  const order = await prisma.order.findUnique({ where: { id: orderId } });
+  if (!order) throw apiError("ORDER_NOT_FOUND", "Order not found", 404);
+  const events = await prisma.aiEvent.findMany({
+    where: {
+      orderId,
+      module: { in: ["QUALITY_VISION", "ORDER_RISK"] }
+    },
+    orderBy: { createdAt: "desc" },
+    take: 4
+  });
+  return {
+    orderId,
+    quality: events.find((event) => event.module === "QUALITY_VISION") ?? null,
+    risk: events.find((event) => event.module === "ORDER_RISK") ?? null
+  };
+});
+
+app.post("/ai/risk/:orderId", async (request) => {
+  const user = await requireUser(request);
+  requireAnyRole(user, [...QUALITY_ROLES, ...OPERATION_ROLES]);
+  const { orderId } = request.params as { orderId: string };
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: {
+      executor: {
+        select: {
+          activeOrders: true,
+          rating: true,
+          completedOrders: true
+        }
+      }
+    }
+  });
+  if (!order) throw apiError("ORDER_NOT_FOUND", "Order not found", 404);
+  const [previousDisputes, clientReviewStats, clientOrderCount] = await Promise.all([
+    prisma.dispute.count({ where: { orderId } }),
+    prisma.review.aggregate({
+      where: { clientId: order.clientId },
+      _avg: { rating: true }
+    }),
+    prisma.order.count({ where: { clientId: order.clientId } })
+  ]);
+  const result = await assessOrderRisk({
+    orderId,
+    status: order.status,
+    urgent: order.urgent,
+    complexityScore: order.complexityScore,
+    priceTotal: order.priceTotal,
+    hasExecutor: Boolean(order.executorId),
+    executorActiveOrders: order.executor?.activeOrders,
+    executorRating: order.executor?.rating,
+    executorCompletedOrders: order.executor?.completedOrders,
+    clientOrderCount,
+    clientAverageRating: clientReviewStats._avg.rating ?? undefined,
+    previousDisputes
+  });
+  const event = await prisma.aiEvent.create({
+    data: {
+      orderId,
+      module: "ORDER_RISK",
+      input: {
+        status: order.status,
+        urgent: order.urgent,
+        complexityScore: order.complexityScore,
+        previousDisputes,
+        clientOrderCount,
+        clientAverageRating: clientReviewStats._avg.rating,
+        executorActiveOrders: order.executor?.activeOrders ?? null
+      },
+      output: jsonValue(result),
+      explanation: [
+        result.data.summary,
+        ...result.data.reasons,
+        ...result.data.recommendedActions
+      ]
+    }
+  });
+  return { risk: result, eventId: event.id };
+});
+
+app.post("/ai/forecast", async (request) => {
+  const user = await requireUser(request);
+  requireAnyRole(user, ANALYTICS_ROLES);
+  const input = forecastRequestSchema.parse(request.body ?? {});
+  const historyStart = new Date();
+  historyStart.setUTCHours(0, 0, 0, 0);
+  historyStart.setUTCDate(historyStart.getUTCDate() - 59);
+  const [orders, activeExecutors, currentActiveOrders] = await Promise.all([
+    prisma.order.findMany({
+      where: { createdAt: { gte: historyStart } },
+      select: { createdAt: true }
+    }),
+    prisma.user.count({ where: { role: Role.EXECUTOR } }),
+    prisma.order.count({
+      where: {
+        status: {
+          in: [
+            OrderStatus.ASSIGNED,
+            OrderStatus.ACCEPTED,
+            OrderStatus.IN_PROGRESS,
+            OrderStatus.QUALITY_CHECK
+          ]
+        }
+      }
+    })
+  ]);
+  const dailyCounts = new Map<string, number>();
+  for (let offset = 0; offset < 60; offset += 1) {
+    const date = new Date(historyStart);
+    date.setUTCDate(date.getUTCDate() + offset);
+    dailyCounts.set(date.toISOString().slice(0, 10), 0);
+  }
+  for (const order of orders) {
+    const date = order.createdAt.toISOString().slice(0, 10);
+    dailyCounts.set(date, (dailyCounts.get(date) ?? 0) + 1);
+  }
+  const dailyOrders = [...dailyCounts.entries()].map(([date, count]) => ({
+    date,
+    orders: count
+  }));
+  const result = await forecastDemand({
+    horizonDays: input.horizonDays,
+    dailyOrders,
+    activeExecutors,
+    currentActiveOrders
+  });
+  const event = await prisma.aiEvent.create({
+    data: {
+      module: "DEMAND_FORECAST",
+      input: {
+        horizonDays: input.horizonDays,
+        historyDays: dailyOrders.length,
+        activeExecutors,
+        currentActiveOrders
+      },
+      output: jsonValue(result),
+      explanation: [
+        result.data.summary,
+        ...result.data.risks,
+        ...result.data.staffingRecommendations
+      ]
+    }
+  });
+  return { forecast: result, eventId: event.id };
 });
 
 app.get("/analytics/summary", async (request) => {
