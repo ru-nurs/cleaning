@@ -1,0 +1,823 @@
+openapi: 3.1.0
+info:
+  title: AI Cleaning Ecosystem MVP API
+  version: 0.1.0
+  description: |
+    Contract for the native Android MVP. Money values are integer KZT.
+    AI pricing and matching are deterministic, explainable scoring rules.
+servers:
+  - url: http://localhost:4000
+    description: Local development
+tags:
+  - name: System
+  - name: Auth
+  - name: Orders
+  - name: Payments
+  - name: Quality
+  - name: Notifications
+  - name: Operations
+  - name: Reviews
+paths:
+  /health:
+    get:
+      tags: [System]
+      summary: API health
+      operationId: getHealth
+      responses:
+        "200":
+          description: API is running
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, service]
+                properties:
+                  ok: { type: boolean, const: true }
+                  service: { type: string }
+  /catalog/services:
+    get:
+      tags: [System]
+      summary: List service catalog
+      operationId: listServices
+      responses:
+        "200":
+          description: Services
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Service" }
+        default: { $ref: "#/components/responses/Error" }
+  /geo/geocode:
+    get:
+      tags: [System]
+      summary: MVP deterministic geocoding
+      operationId: geocodeAddress
+      parameters:
+        - in: query
+          name: address
+          required: true
+          schema: { type: string, minLength: 3 }
+      responses:
+        "200":
+          description: Geocoding result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GeocodeResult" }
+        "400": { $ref: "#/components/responses/Error" }
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a client or executor
+      operationId: register
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RegisterRequest" }
+      responses:
+        "200":
+          description: User and session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identifier, password]
+              properties:
+                identifier: { type: string, minLength: 3 }
+                password: { type: string, minLength: 6 }
+      responses:
+        "200":
+          description: User and session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+  /auth/demo-login:
+    post:
+      tags: [Auth]
+      summary: Development-only demo login
+      description: This route returns 404 in production.
+      operationId: demoLogin
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role: { $ref: "#/components/schemas/Role" }
+      responses:
+        "200":
+          description: Demo user and session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResponse" }
+        "404": { $ref: "#/components/responses/Error" }
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Validate session and return current user
+      operationId: getCurrentUser
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Error" }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke current session
+      operationId: logout
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Session revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean }
+  /orders:
+    get:
+      tags: [Orders]
+      summary: List orders visible to the current role
+      operationId: listOrders
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Role-filtered orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Order" }
+        "401": { $ref: "#/components/responses/Error" }
+    post:
+      tags: [Orders]
+      summary: Create and price a client order
+      operationId: createOrder
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateOrderRequest" }
+      responses:
+        "200":
+          description: Priced order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [order]
+                properties:
+                  order: { $ref: "#/components/schemas/Order" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /orders/{id}/assign:
+    post:
+      tags: [Orders]
+      summary: Assign best executor to a confirmed order
+      operationId: assignOrder
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Assigned order and matching explanation
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [order]
+                properties:
+                  order: { $ref: "#/components/schemas/Order" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /orders/{id}/status:
+    post:
+      tags: [Orders]
+      summary: Executor accepts or starts assigned work
+      operationId: progressOrder
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [ACCEPTED, IN_PROGRESS]
+      responses:
+        "200":
+          description: Updated order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [order]
+                properties:
+                  order: { $ref: "#/components/schemas/Order" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /clients/{clientId}/orders:
+    get:
+      tags: [Orders]
+      summary: Client order history
+      operationId: getClientOrders
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: clientId
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Client order history
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Order" }
+        "403": { $ref: "#/components/responses/Error" }
+  /performer/tasks/{executorId}:
+    get:
+      tags: [Orders]
+      summary: Assigned executor tasks
+      operationId: getExecutorTasks
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: executorId
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Executor tasks
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Order" }
+        "403": { $ref: "#/components/responses/Error" }
+  /payments/intent:
+    post:
+      tags: [Payments]
+      summary: Create an idempotent MVP payment intent
+      operationId: createPaymentIntent
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema: { type: string, minLength: 8, maxLength: 120 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderId]
+              properties:
+                orderId: { type: string }
+                method:
+                  type: string
+                  enum: [cash, card, kaspi_placeholder]
+                  default: kaspi_placeholder
+      responses:
+        "200":
+          description: Pending or existing payment
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [payment]
+                properties:
+                  payment: { $ref: "#/components/schemas/Payment" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /payments/{id}/confirm:
+    post:
+      tags: [Payments]
+      summary: Confirm a pending MVP client payment
+      operationId: confirmPayment
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Paid payment and confirmed order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [payment, order]
+                properties:
+                  payment: { $ref: "#/components/schemas/Payment" }
+                  order: { $ref: "#/components/schemas/Order" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /payments/release/{orderId}:
+    post:
+      tags: [Payments]
+      summary: Release an executor payout for a completed order
+      operationId: releasePayout
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: orderId
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Released payout and order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [payout, order]
+                properties:
+                  payout: { $ref: "#/components/schemas/Payment" }
+                  order: { $ref: "#/components/schemas/Order" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /quality/proof:
+    post:
+      tags: [Quality]
+      summary: Submit executor checklist and proof image
+      operationId: submitProof
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SubmitProofRequest" }
+      responses:
+        "200":
+          description: Stored proof, pending quality check, and order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [proof, qualityCheck, order]
+                properties:
+                  proof: { $ref: "#/components/schemas/ProofAsset" }
+                  qualityCheck: { $ref: "#/components/schemas/QualityCheck" }
+                  order: { $ref: "#/components/schemas/Order" }
+        "400": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+  /quality/{orderId}/complete:
+    post:
+      tags: [Quality]
+      summary: Approve quality or request rework
+      operationId: completeQuality
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: orderId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                score: { type: integer, minimum: 0, maximum: 100, default: 92 }
+                notes: { type: string, maxLength: 500 }
+                approved: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Quality decision and order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [qualityCheck, order]
+                properties:
+                  qualityCheck: { $ref: "#/components/schemas/QualityCheck" }
+                  order: { $ref: "#/components/schemas/Order" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /reviews:
+    post:
+      tags: [Reviews]
+      summary: Create one client review for a completed order
+      operationId: createReview
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderId, clientId, rating]
+              properties:
+                orderId: { type: string }
+                clientId: { type: string }
+                rating: { type: integer, minimum: 1, maximum: 5 }
+                comment: { type: string, maxLength: 500 }
+      responses:
+        "200":
+          description: Created review
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [review]
+                properties:
+                  review: { $ref: "#/components/schemas/Review" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /notifications/{userId}:
+    get:
+      tags: [Notifications]
+      summary: List user notifications
+      operationId: getNotifications
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Notifications
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Notification" }
+        "403": { $ref: "#/components/responses/Error" }
+  /notifications/{id}/read:
+    post:
+      tags: [Notifications]
+      summary: Mark a notification read or delivered
+      operationId: markNotificationRead
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                read: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Updated notification
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [notification]
+                properties:
+                  notification: { $ref: "#/components/schemas/Notification" }
+        "403": { $ref: "#/components/responses/Error" }
+  /operations/dashboard:
+    get:
+      tags: [Operations]
+      summary: Operations dashboard
+      operationId: getOperationsDashboard
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Operations metrics and recent orders
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "403": { $ref: "#/components/responses/Error" }
+  /operations/orders:
+    get:
+      tags: [Operations]
+      summary: Operations order list
+      operationId: getOperationsOrders
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Recent orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Order" }
+        "403": { $ref: "#/components/responses/Error" }
+  /operations/orders/{id}/manual-assign:
+    post:
+      tags: [Operations]
+      summary: Assign or replace an executor manually
+      operationId: manualAssignOrder
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [executorId]
+              properties:
+                executorId: { type: string }
+      responses:
+        "200":
+          description: Assigned order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [order]
+                properties:
+                  order: { $ref: "#/components/schemas/Order" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /analytics/summary:
+    get:
+      tags: [Operations]
+      summary: Manager analytics summary
+      operationId: getAnalyticsSummary
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Summary metrics
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [orders, users, aiEvents, revenue]
+                properties:
+                  orders: { type: integer }
+                  users: { type: integer }
+                  aiEvents: { type: integer }
+                  revenue: { type: integer }
+        "403": { $ref: "#/components/responses/Error" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-session-token
+  parameters:
+    Id:
+      in: path
+      name: id
+      required: true
+      schema: { type: string }
+  responses:
+    Error:
+      description: Unified API error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  schemas:
+    Role:
+      type: string
+      enum: [CLIENT, EXECUTOR, OPERATOR, QUALITY_MANAGER, MANAGER, ADMIN]
+    OrderStatus:
+      type: string
+      enum:
+        - CREATED
+        - PRICED
+        - CONFIRMED
+        - ASSIGNED
+        - ACCEPTED
+        - IN_PROGRESS
+        - QUALITY_CHECK
+        - COMPLETED
+        - PAYMENT_RELEASED
+        - DISPUTE
+    User:
+      type: object
+      required: [id, name, role, rating, distanceKm, activeOrders, completedOrders]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        email: { type: [string, "null"], format: email }
+        phone: { type: [string, "null"] }
+        role: { $ref: "#/components/schemas/Role" }
+        rating: { type: number }
+        distanceKm: { type: number }
+        activeOrders: { type: integer }
+        completedOrders: { type: integer }
+    Service:
+      type: object
+      required: [id, title, basePrice, durationMinutes, mvp]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        basePrice: { type: integer }
+        durationMinutes: { type: integer }
+        mvp: { type: boolean }
+    Order:
+      type: object
+      required:
+        - id
+        - clientId
+        - serviceId
+        - status
+        - address
+        - areaSqm
+        - rooms
+        - priceTotal
+        - complexityScore
+        - version
+      properties:
+        id: { type: string }
+        clientId: { type: string }
+        executorId: { type: [string, "null"] }
+        serviceId: { type: string }
+        status: { $ref: "#/components/schemas/OrderStatus" }
+        address: { type: string }
+        areaSqm: { type: integer }
+        rooms: { type: integer }
+        hasPets: { type: boolean }
+        urgent: { type: boolean }
+        latitude: { type: [number, "null"] }
+        longitude: { type: [number, "null"] }
+        serviceZone: { type: [string, "null"] }
+        scheduledAt: { type: [string, "null"], format: date-time }
+        priceTotal: { type: integer }
+        complexityScore: { type: integer, minimum: 0, maximum: 100 }
+        version: { type: integer }
+    Payment:
+      type: object
+      required: [id, orderId, amount, status, kind, createdAt]
+      properties:
+        id: { type: string }
+        orderId: { type: string }
+        amount: { type: integer }
+        status:
+          type: string
+          enum: [PENDING, PAID, RELEASED, REFUNDED, CANCELLED]
+        kind:
+          type: string
+          enum: [CLIENT_CASH, CLIENT_CARD, CLIENT_KASPI_PLACEHOLDER, EXECUTOR_PAYOUT, REFUND]
+        createdAt: { type: string, format: date-time }
+    ProofAsset:
+      type: object
+      required: [id, orderId, kind, uri, createdAt]
+      properties:
+        id: { type: string }
+        orderId: { type: string }
+        kind: { type: string, const: PHOTO_FILE }
+        uri: { type: string }
+        notes: { type: [string, "null"] }
+        createdAt: { type: string, format: date-time }
+    QualityCheck:
+      type: object
+      required: [id, orderId, status, score, createdAt]
+      properties:
+        id: { type: string }
+        orderId: { type: string }
+        status:
+          type: string
+          enum: [PENDING_REVIEW, APPROVED, REWORK_REQUIRED]
+        score: { type: integer, minimum: 0, maximum: 100 }
+        notes: { type: [string, "null"] }
+        createdAt: { type: string, format: date-time }
+    Notification:
+      type: object
+      required: [id, userId, type, title, body, status, metadata, createdAt]
+      properties:
+        id: { type: string }
+        userId: { type: string }
+        type: { type: string }
+        title: { type: string }
+        body: { type: string }
+        status: { type: string, enum: [DELIVERED, READ] }
+        readAt: { type: [string, "null"], format: date-time }
+        metadata: { type: object, additionalProperties: true }
+        createdAt: { type: string, format: date-time }
+    Review:
+      type: object
+      required: [id, orderId, clientId, rating, createdAt]
+      properties:
+        id: { type: string }
+        orderId: { type: string }
+        clientId: { type: string }
+        executorId: { type: [string, "null"] }
+        rating: { type: integer, minimum: 1, maximum: 5 }
+        comment: { type: [string, "null"] }
+        createdAt: { type: string, format: date-time }
+    GeocodeResult:
+      type: object
+      required:
+        - provider
+        - address
+        - city
+        - latitude
+        - longitude
+        - serviceZone
+        - inServiceArea
+        - confidence
+      properties:
+        provider: { type: string, const: placeholder }
+        address: { type: string }
+        city: { type: string }
+        latitude: { type: number }
+        longitude: { type: number }
+        serviceZone: { type: string }
+        inServiceArea: { type: boolean }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        note: { type: string }
+    RegisterRequest:
+      type: object
+      required: [name, password]
+      anyOf:
+        - required: [email]
+        - required: [phone]
+      properties:
+        name: { type: string, minLength: 2 }
+        email: { type: string, format: email }
+        phone: { type: string, minLength: 6 }
+        password: { type: string, minLength: 6 }
+        role:
+          type: string
+          enum: [CLIENT, EXECUTOR]
+          default: CLIENT
+    AuthResponse:
+      type: object
+      required: [user, token, expiresAt]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        token: { type: string }
+        expiresAt: { type: string, format: date-time }
+    CreateOrderRequest:
+      type: object
+      required: [clientId, serviceId, address, areaSqm, rooms]
+      properties:
+        clientId: { type: string }
+        serviceId: { type: string }
+        address: { type: string, minLength: 3 }
+        areaSqm: { type: integer, minimum: 1 }
+        rooms: { type: integer, minimum: 1 }
+        hasPets: { type: boolean, default: false }
+        urgent: { type: boolean, default: false }
+        latitude: { type: number }
+        longitude: { type: number }
+        serviceZone: { type: string }
+        scheduledAt: { type: string, format: date-time }
+    SubmitProofRequest:
+      type: object
+      required: [orderId, photoUri, photoBase64, mimeType, checklist]
+      properties:
+        orderId: { type: string }
+        executorId: { type: string }
+        photoUri: { type: string, minLength: 3 }
+        photoBase64:
+          type: string
+          contentEncoding: base64
+          maxLength: 14000000
+        fileName: { type: string, maxLength: 120 }
+        mimeType:
+          type: string
+          enum: [image/jpeg, image/png, image/webp]
+        notes: { type: string, maxLength: 500 }
+        checklist:
+          type: array
+          minItems: 1
+          maxItems: 30
+          items: { type: string, minLength: 1, maxLength: 120 }
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details, requestId]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              oneOf:
+                - { type: object, additionalProperties: true }
+                - { type: array, items: {} }
+            requestId: { type: string }

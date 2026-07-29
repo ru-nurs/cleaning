@@ -1,0 +1,27 @@
+{
+  "name": "cleaning-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/api",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "npm --workspace apps/api run dev",
+    "start": "npm --workspace apps/api run start",
+    "build": "npm --workspace packages/shared run build && npm --workspace apps/api run build",
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm --workspace apps/api run test",
+    "db:generate": "npm --workspace apps/api run db:generate",
+    "db:migrate": "npm --workspace apps/api run db:migrate",
+    "db:deploy": "npm --workspace apps/api run db:deploy",
+    "db:seed": "npm --workspace apps/api run db:seed"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.3"
+  }
+}

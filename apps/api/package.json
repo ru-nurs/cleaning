@@ -1,0 +1,33 @@
+{
+  "name": "@ai-cleaning/api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "build": "prisma generate && tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/domain.test.ts src/media.test.ts src/scoring.test.ts src/server.contract.test.ts src/migration.contract.test.ts src/e2e.test.ts",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@ai-cleaning/shared": "0.1.0",
+    "@fastify/cors": "^11.2.0",
+    "@prisma/client": "^6.19.3",
+    "fastify": "^5.10.0",
+    "tsx": "^4.23.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "prisma": "^6.19.3",
+    "typescript": "~6.0.3"
+  }
+}

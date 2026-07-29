@@ -1,0 +1,268 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CLIENT
+  EXECUTOR
+  OPERATOR
+  QUALITY_MANAGER
+  MANAGER
+  ADMIN
+}
+
+enum OrderStatus {
+  CREATED
+  PRICED
+  CONFIRMED
+  ASSIGNED
+  ACCEPTED
+  IN_PROGRESS
+  QUALITY_CHECK
+  COMPLETED
+  PAYMENT_RELEASED
+  DISPUTE
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  RELEASED
+  REFUNDED
+  CANCELLED
+}
+
+enum PaymentKind {
+  CLIENT_CASH
+  CLIENT_CARD
+  CLIENT_KASPI_PLACEHOLDER
+  EXECUTOR_PAYOUT
+  REFUND
+}
+
+enum QualityCheckStatus {
+  PENDING_REVIEW
+  APPROVED
+  REWORK_REQUIRED
+}
+
+enum DisputeStatus {
+  OPEN
+  REWORK_REQUESTED
+  RESOLVED
+}
+
+model User {
+  id               String               @id @default(cuid())
+  name             String
+  phone            String?              @unique
+  email            String?              @unique
+  passwordHash     String?
+  role             Role
+  rating           Float                @default(5)
+  distanceKm       Float                @default(4)
+  activeOrders     Int                  @default(0)
+  completedOrders  Int                  @default(0)
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+  clientOrders     Order[]              @relation("ClientOrders")
+  executorOrders   Order[]              @relation("ExecutorOrders")
+  clientReviews    Review[]             @relation("ClientReviews")
+  executorReviews  Review[]             @relation("ExecutorReviews")
+  auditEvents      AuditEvent[]
+  sessions         Session[]
+  notifications    Notification[]
+  statusChanges    OrderStatusHistory[] @relation("StatusChangedBy")
+  openedDisputes   Dispute[]            @relation("DisputeOpenedBy")
+  resolvedDisputes Dispute[]            @relation("DisputeResolvedBy")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  type      String
+  title     String
+  body      String
+  status    String    @default("DELIVERED")
+  readAt    DateTime?
+  metadata  Json
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model ServiceCatalog {
+  id              String   @id
+  title           String
+  basePrice       Int
+  durationMinutes Int
+  mvp             Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  orders          Order[]
+}
+
+model Order {
+  id              String               @id @default(cuid())
+  clientId        String
+  executorId      String?
+  serviceId       String
+  status          OrderStatus          @default(CREATED)
+  address         String
+  areaSqm         Int
+  rooms           Int
+  hasPets         Boolean              @default(false)
+  urgent          Boolean              @default(false)
+  latitude        Float?
+  longitude       Float?
+  serviceZone     String?
+  priceTotal      Int                  @default(0)
+  complexityScore Int                  @default(0)
+  version         Int                  @default(0)
+  scheduledAt     DateTime?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  client          User                 @relation("ClientOrders", fields: [clientId], references: [id])
+  executor        User?                @relation("ExecutorOrders", fields: [executorId], references: [id])
+  service         ServiceCatalog       @relation(fields: [serviceId], references: [id])
+  payments        Payment[]
+  qualityChecks   QualityCheck[]
+  proofAssets     ProofAsset[]
+  reviews         Review[]
+  aiEvents        AiEvent[]
+  statusHistory   OrderStatusHistory[]
+  dispute         Dispute?
+
+  @@index([status])
+  @@index([clientId])
+  @@index([executorId])
+}
+
+model Review {
+  id         String   @id @default(cuid())
+  orderId    String
+  clientId   String
+  executorId String?
+  rating     Int
+  comment    String?
+  createdAt  DateTime @default(now())
+  order      Order    @relation(fields: [orderId], references: [id])
+  client     User     @relation("ClientReviews", fields: [clientId], references: [id])
+  executor   User?    @relation("ExecutorReviews", fields: [executorId], references: [id])
+
+  @@unique([orderId, clientId])
+  @@index([orderId])
+  @@index([clientId])
+  @@index([executorId])
+}
+
+model ProofAsset {
+  id        String   @id @default(cuid())
+  orderId   String
+  kind      String
+  uri       String
+  notes     String?
+  createdAt DateTime @default(now())
+  order     Order    @relation(fields: [orderId], references: [id])
+
+  @@index([orderId])
+}
+
+model Payment {
+  id             String        @id @default(cuid())
+  orderId        String
+  amount         Int
+  status         PaymentStatus
+  kind           PaymentKind
+  idempotencyKey String?       @unique
+  createdAt      DateTime      @default(now())
+  order          Order         @relation(fields: [orderId], references: [id])
+
+  @@index([orderId, kind])
+}
+
+model QualityCheck {
+  id        String             @id @default(cuid())
+  orderId   String
+  status    QualityCheckStatus
+  score     Int
+  notes     String?
+  createdAt DateTime           @default(now())
+  order     Order              @relation(fields: [orderId], references: [id])
+
+  @@index([orderId, createdAt])
+}
+
+model AiEvent {
+  id          String   @id @default(cuid())
+  orderId     String?
+  module      String
+  input       Json
+  output      Json
+  explanation String[]
+  createdAt   DateTime @default(now())
+  order       Order?   @relation(fields: [orderId], references: [id])
+}
+
+model AuditEvent {
+  id        String   @id @default(cuid())
+  actorId   String?
+  action    String
+  target    String
+  metadata  Json
+  createdAt DateTime @default(now())
+  actor     User?    @relation(fields: [actorId], references: [id])
+}
+
+model OrderStatusHistory {
+  id         String       @id @default(cuid())
+  orderId    String
+  fromStatus OrderStatus?
+  toStatus   OrderStatus
+  actorId    String?
+  reason     String
+  metadata   Json
+  createdAt  DateTime     @default(now())
+  order      Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  actor      User?        @relation("StatusChangedBy", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([orderId, createdAt])
+  @@index([actorId])
+}
+
+model Dispute {
+  id           String        @id @default(cuid())
+  orderId      String        @unique
+  status       DisputeStatus @default(OPEN)
+  reason       String
+  resolution   String?
+  openedById   String?
+  resolvedById String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  resolvedAt   DateTime?
+  order        Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  openedBy     User?         @relation("DisputeOpenedBy", fields: [openedById], references: [id], onDelete: SetNull)
+  resolvedBy   User?         @relation("DisputeResolvedBy", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  @@index([status])
+}
