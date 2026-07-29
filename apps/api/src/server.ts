@@ -65,6 +65,24 @@ const loginSchema = z.object({
   password: z.string().min(6)
 });
 
+const nullableEmailSchema = z.preprocess(
+  (value) => typeof value === "string" && value.trim() === "" ? null : value,
+  z.string().trim().email().max(254).transform((value) => value.toLowerCase()).nullable()
+);
+
+const nullablePhoneSchema = z.preprocess(
+  (value) => typeof value === "string" && value.trim() === "" ? null : value,
+  z.string().trim().min(6).max(24).nullable()
+);
+
+const updateProfileSchema = z.object({
+  name: z.string().trim().min(2).max(80),
+  email: nullableEmailSchema,
+  phone: nullablePhoneSchema
+}).refine((value) => value.email || value.phone, {
+  message: "Email or phone is required"
+});
+
 const createOrderSchema = z.object({
   clientId: z.string(),
   serviceId: z.string(),
@@ -474,6 +492,51 @@ app.post("/auth/login", async (request) => {
 app.get("/auth/me", async (request) => {
   const user = await requireUser(request);
   return { user: publicUser(user) };
+});
+
+app.patch("/users/me/profile", async (request) => {
+  const user = await requireUser(request);
+  const input = updateProfileSchema.parse(request.body);
+  const existing = await prisma.user.findFirst({
+    where: {
+      id: { not: user.id },
+      OR: [
+        ...(input.email ? [{ email: input.email }] : []),
+        ...(input.phone ? [{ phone: input.phone }] : [])
+      ]
+    }
+  });
+  if (existing) {
+    throw apiError("USER_ALREADY_EXISTS", "Email or phone is already in use", 409);
+  }
+
+  const changedFields = [
+    user.name !== input.name ? "name" : null,
+    user.email !== input.email ? "email" : null,
+    user.phone !== input.phone ? "phone" : null
+  ].filter((field): field is string => field !== null);
+
+  const updated = await prisma.$transaction(async (tx) => {
+    const updatedUser = await tx.user.update({
+      where: { id: user.id },
+      data: {
+        name: input.name,
+        email: input.email,
+        phone: input.phone
+      }
+    });
+    await tx.auditEvent.create({
+      data: {
+        actorId: user.id,
+        action: "USER_PROFILE_UPDATED",
+        target: `user:${user.id}`,
+        metadata: { changedFields }
+      }
+    });
+    return updatedUser;
+  });
+
+  return { user: publicUser(updated) };
 });
 
 app.post("/auth/logout", async (request) => {

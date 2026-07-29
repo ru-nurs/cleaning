@@ -9,7 +9,7 @@ const numberFromEnv = (name: string, fallback: number) => {
 };
 
 export const appConfig = {
-  currency: process.env.CURRENCY ?? "KZT",
+  currency: process.env.CURRENCY ?? "RUB",
   sessionTtlDays: numberFromEnv("SESSION_TTL_DAYS", 30),
   maxProofBytes: numberFromEnv("MAX_PROOF_BYTES", 10 * 1024 * 1024),
   payoutRatio: numberFromEnv("PAYOUT_RATIO", 0.72),

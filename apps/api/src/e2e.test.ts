@@ -40,7 +40,7 @@ test(
         data: {
           id: "standard_apartment",
           title: "Standard apartment cleaning",
-          basePrice: 18_000,
+          basePrice: 3_000,
           durationMinutes: 150,
           mvp: true
         }
@@ -59,6 +59,20 @@ test(
       });
       assert.equal(registerClient.statusCode, 200, registerClient.body);
       const clientAuth = registerClient.json();
+
+      const updatedProfile = await app.inject({
+        method: "PATCH",
+        url: "/users/me/profile",
+        headers: authHeaders(clientAuth.token),
+        payload: {
+          name: "E2E Client Updated",
+          email: clientAuth.user.email,
+          phone: "+79990000001"
+        }
+      });
+      assert.equal(updatedProfile.statusCode, 200, updatedProfile.body);
+      assert.equal(updatedProfile.json().user.name, "E2E Client Updated");
+      assert.equal(updatedProfile.json().user.phone, "+79990000001");
 
       const registerExecutor = await app.inject({
         method: "POST",

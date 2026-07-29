@@ -3,7 +3,7 @@ info:
   title: AI Cleaning Ecosystem MVP API
   version: 0.1.0
   description: |
-    Contract for the native Android MVP. Money values are integer KZT.
+    Contract for the native Android MVP. Money values are integer RUB.
     AI pricing and matching are deterministic, explainable scoring rules.
 servers:
   - url: http://localhost:4000
@@ -143,6 +143,30 @@ paths:
                 properties:
                   user: { $ref: "#/components/schemas/User" }
         "401": { $ref: "#/components/responses/Error" }
+  /users/me/profile:
+    patch:
+      tags: [Auth]
+      summary: Update the current user's profile
+      operationId: updateCurrentUserProfile
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateProfileRequest" }
+      responses:
+        "200":
+          description: Updated current user
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /auth/logout:
     post:
       tags: [Auth]
@@ -759,6 +783,20 @@ components:
         email: { type: string, format: email }
         phone: { type: string, minLength: 6 }
         password: { type: string, minLength: 6 }
+    UpdateProfileRequest:
+      type: object
+      required: [name, email, phone]
+      anyOf:
+        - required: [email]
+          properties:
+            email: { type: string, format: email }
+        - required: [phone]
+          properties:
+            phone: { type: string, minLength: 6 }
+      properties:
+        name: { type: string, minLength: 2, maxLength: 80 }
+        email: { type: [string, "null"], format: email }
+        phone: { type: [string, "null"], minLength: 6, maxLength: 24 }
         role:
           type: string
           enum: [CLIENT, EXECUTOR]

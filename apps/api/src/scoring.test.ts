@@ -17,7 +17,7 @@ test("pricing is deterministic and returns an explanation", () => {
   const second = estimateOrderPrice(input);
 
   assert.deepEqual(first, second);
-  assert.equal(first.total, 21_600);
+  assert.equal(first.total, 3_600);
   assert.equal(first.complexityScore, 40);
   assert.ok(first.explanation.length >= 4);
 });
