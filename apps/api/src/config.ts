@@ -14,7 +14,7 @@ export const appConfig = {
   maxProofBytes: numberFromEnv("MAX_PROOF_BYTES", 10 * 1024 * 1024),
   payoutRatio: numberFromEnv("PAYOUT_RATIO", 0.72),
   requestBodyLimitBytes: numberFromEnv("REQUEST_BODY_LIMIT_BYTES", 25 * 1024 * 1024),
-  openAiModel: process.env.OPENAI_MODEL?.trim() || "gpt-5.6-sol",
+  openAiModel: process.env.OPENAI_MODEL?.trim() || "gpt-5.6-luna",
   openAiTimeoutMs: numberFromEnv("OPENAI_TIMEOUT_MS", 45_000)
 };
 
