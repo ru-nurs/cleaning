@@ -47,13 +47,16 @@ test(
       });
 
       const suffix = Date.now();
+      const clientPassword = "E2E-client-password-1";
+      const changedClientPassword = "E2E-client-password-2";
+      const executorPassword = "E2E-executor-password-1";
       const registerClient = await app.inject({
         method: "POST",
         url: "/auth/register",
         payload: {
           name: "E2E Client",
           email: `client-${suffix}@example.test`,
-          password: "password1",
+          password: clientPassword,
           role: "CLIENT"
         }
       });
@@ -74,13 +77,95 @@ test(
       assert.equal(updatedProfile.json().user.name, "E2E Client Updated");
       assert.equal(updatedProfile.json().user.phone, "+79990000001");
 
+      const secondClientLogin = await app.inject({
+        method: "POST",
+        url: "/auth/login",
+        payload: {
+          identifier: clientAuth.user.email,
+          password: clientPassword
+        }
+      });
+      assert.equal(secondClientLogin.statusCode, 200, secondClientLogin.body);
+      const secondClientAuth = secondClientLogin.json();
+
+      const invalidCurrentPassword = await app.inject({
+        method: "PATCH",
+        url: "/users/me/password",
+        headers: authHeaders(clientAuth.token),
+        payload: {
+          currentPassword: "Wrong-current-password-1",
+          newPassword: changedClientPassword
+        }
+      });
+      assert.equal(invalidCurrentPassword.statusCode, 401, invalidCurrentPassword.body);
+      assert.equal(invalidCurrentPassword.json().error.code, "AUTH_CURRENT_PASSWORD_INVALID");
+
+      const reusedPassword = await app.inject({
+        method: "PATCH",
+        url: "/users/me/password",
+        headers: authHeaders(clientAuth.token),
+        payload: {
+          currentPassword: clientPassword,
+          newPassword: clientPassword
+        }
+      });
+      assert.equal(reusedPassword.statusCode, 409, reusedPassword.body);
+      assert.equal(reusedPassword.json().error.code, "PASSWORD_REUSE");
+
+      const changedPassword = await app.inject({
+        method: "PATCH",
+        url: "/users/me/password",
+        headers: authHeaders(clientAuth.token),
+        payload: {
+          currentPassword: clientPassword,
+          newPassword: changedClientPassword
+        }
+      });
+      assert.equal(changedPassword.statusCode, 200, changedPassword.body);
+      assert.equal(changedPassword.json().ok, true);
+      assert.equal(changedPassword.json().revokedSessions, 1);
+
+      const currentSessionStillValid = await app.inject({
+        method: "GET",
+        url: "/auth/me",
+        headers: authHeaders(clientAuth.token)
+      });
+      assert.equal(currentSessionStillValid.statusCode, 200, currentSessionStillValid.body);
+
+      const secondSessionRevoked = await app.inject({
+        method: "GET",
+        url: "/auth/me",
+        headers: authHeaders(secondClientAuth.token)
+      });
+      assert.equal(secondSessionRevoked.statusCode, 401, secondSessionRevoked.body);
+
+      const oldPasswordRejected = await app.inject({
+        method: "POST",
+        url: "/auth/login",
+        payload: {
+          identifier: clientAuth.user.email,
+          password: clientPassword
+        }
+      });
+      assert.equal(oldPasswordRejected.statusCode, 401, oldPasswordRejected.body);
+
+      const changedPasswordAccepted = await app.inject({
+        method: "POST",
+        url: "/auth/login",
+        payload: {
+          identifier: clientAuth.user.email,
+          password: changedClientPassword
+        }
+      });
+      assert.equal(changedPasswordAccepted.statusCode, 200, changedPasswordAccepted.body);
+
       const registerExecutor = await app.inject({
         method: "POST",
         url: "/auth/register",
         payload: {
           name: "E2E Executor",
           email: `executor-${suffix}@example.test`,
-          password: "password1",
+          password: executorPassword,
           role: "EXECUTOR"
         }
       });

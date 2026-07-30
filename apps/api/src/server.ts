@@ -34,6 +34,7 @@ import {
   getAiStatus
 } from "./ai.js";
 import { decodeAndValidateProofImage, decodeAndValidateProofMedia, extensionForProofMimeType } from "./media.js";
+import { isStrongPassword, PASSWORD_MAX_LENGTH } from "./passwordPolicy.js";
 
 export const prisma = new PrismaClient();
 export const app = Fastify({
@@ -61,7 +62,9 @@ const registerSchema = z.object({
   name: z.string().min(2),
   email: z.string().email().optional(),
   phone: z.string().min(6).optional(),
-  password: z.string().min(6),
+  password: z.string().max(PASSWORD_MAX_LENGTH).refine(isStrongPassword, {
+    message: "Password must be at least 12 characters and contain a Latin letter and a digit"
+  }),
   role: authRoleSchema.default("CLIENT")
 }).refine((value) => value.email || value.phone, {
   message: "Email or phone is required"
@@ -69,7 +72,7 @@ const registerSchema = z.object({
 
 const loginSchema = z.object({
   identifier: z.string().min(3),
-  password: z.string().min(6)
+  password: z.string().min(6).max(PASSWORD_MAX_LENGTH)
 });
 
 const nullableEmailSchema = z.preprocess(
@@ -88,6 +91,13 @@ const updateProfileSchema = z.object({
   phone: nullablePhoneSchema
 }).refine((value) => value.email || value.phone, {
   message: "Email or phone is required"
+});
+
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(6).max(PASSWORD_MAX_LENGTH),
+  newPassword: z.string().max(PASSWORD_MAX_LENGTH).refine(isStrongPassword, {
+    message: "Password must be at least 12 characters and contain a Latin letter and a digit"
+  })
 });
 
 const createOrderSchema = z.object({
@@ -222,6 +232,11 @@ function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
 
+function bearerTokenFromRequest(request: { headers: { authorization?: string } }) {
+  const header = request.headers.authorization;
+  return header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : undefined;
+}
+
 async function createSession(userId: string) {
   const token = randomBytes(32).toString("base64url");
   const expiresAt = new Date(
@@ -238,8 +253,7 @@ async function createSession(userId: string) {
 }
 
 async function getUserFromRequest(request: { headers: { authorization?: string } }) {
-  const header = request.headers.authorization;
-  const token = header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : undefined;
+  const token = bearerTokenFromRequest(request);
   if (!token) return null;
   const session = await prisma.session.findUnique({
     where: { tokenHash: hashToken(token) },
@@ -573,9 +587,58 @@ app.patch("/users/me/profile", async (request) => {
   return { user: publicUser(updated) };
 });
 
+app.patch("/users/me/password", async (request) => {
+  const user = await requireUser(request);
+  const input = changePasswordSchema.parse(request.body);
+  if (!verifyPassword(input.currentPassword, user.passwordHash)) {
+    throw apiError("AUTH_CURRENT_PASSWORD_INVALID", "Current password is invalid", 401);
+  }
+  if (verifyPassword(input.newPassword, user.passwordHash)) {
+    throw apiError("PASSWORD_REUSE", "New password must differ from the current password", 409);
+  }
+
+  const currentToken = bearerTokenFromRequest(request);
+  if (!currentToken) {
+    throw apiError("AUTH_REQUIRED", "Authentication is required", 401);
+  }
+  const currentTokenHash = hashToken(currentToken);
+
+  const revokedSessions = await prisma.$transaction(async (tx) => {
+    await tx.user.update({
+      where: { id: user.id },
+      data: { passwordHash: hashPassword(input.newPassword) }
+    });
+    const revoked = await tx.session.deleteMany({
+      where: {
+        userId: user.id,
+        tokenHash: { not: currentTokenHash }
+      }
+    });
+    await tx.auditEvent.create({
+      data: {
+        actorId: user.id,
+        action: "USER_PASSWORD_CHANGED",
+        target: `user:${user.id}`,
+        metadata: { revokedSessions: revoked.count }
+      }
+    });
+    await tx.notification.create({
+      data: {
+        userId: user.id,
+        type: "PASSWORD_CHANGED",
+        title: "Пароль изменён",
+        body: `Пароль аккаунта изменён. Завершено других сеансов: ${revoked.count}.`,
+        metadata: { revokedSessions: revoked.count }
+      }
+    });
+    return revoked.count;
+  });
+
+  return { ok: true, revokedSessions };
+});
+
 app.post("/auth/logout", async (request) => {
-  const header = request.headers.authorization;
-  const token = header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : undefined;
+  const token = bearerTokenFromRequest(request);
   if (token) {
     await prisma.session.deleteMany({ where: { tokenHash: hashToken(token) } });
   }

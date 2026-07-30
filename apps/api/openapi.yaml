@@ -180,6 +180,31 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /users/me/password:
+    patch:
+      tags: [Auth]
+      summary: Change the current user's password and revoke other sessions
+      operationId: changeCurrentUserPassword
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChangePasswordRequest" }
+      responses:
+        "200":
+          description: Password changed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, revokedSessions]
+                properties:
+                  ok: { type: boolean }
+                  revokedSessions: { type: integer, minimum: 0 }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /auth/logout:
     post:
       tags: [Auth]
@@ -1015,7 +1040,16 @@ components:
         name: { type: string, minLength: 2 }
         email: { type: string, format: email }
         phone: { type: string, minLength: 6 }
-        password: { type: string, minLength: 6 }
+        password:
+          type: string
+          minLength: 12
+          maxLength: 128
+          pattern: '^(?=.*[A-Za-z])(?=.*\d).{12,128}$'
+          description: At least one Latin letter and one digit
+        role:
+          type: string
+          enum: [CLIENT, EXECUTOR]
+          default: CLIENT
     UpdateProfileRequest:
       type: object
       required: [name, email, phone]
@@ -1030,10 +1064,17 @@ components:
         name: { type: string, minLength: 2, maxLength: 80 }
         email: { type: [string, "null"], format: email }
         phone: { type: [string, "null"], minLength: 6, maxLength: 24 }
-        role:
+    ChangePasswordRequest:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword: { type: string, minLength: 6, maxLength: 128 }
+        newPassword:
           type: string
-          enum: [CLIENT, EXECUTOR]
-          default: CLIENT
+          minLength: 12
+          maxLength: 128
+          pattern: '^(?=.*[A-Za-z])(?=.*\d).{12,128}$'
+          description: At least one Latin letter and one digit
     AuthResponse:
       type: object
       required: [user, token, expiresAt]
