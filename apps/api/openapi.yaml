@@ -723,6 +723,92 @@ paths:
                   aiEvents: { type: integer }
                   revenue: { type: integer }
         "403": { $ref: "#/components/responses/Error" }
+  /orders/{id}/confirm-placeholder:
+    post:
+      tags: [Orders]
+      summary: Atomically confirm a placeholder payment and start matching
+      operationId: confirmPlaceholderAndAssign
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: Confirmed order and matching result }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /orders/{id}/retry-assignment:
+    post:
+      tags: [Orders]
+      summary: Retry matching for a confirmed order
+      operationId: retryOrderAssignment
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: Matching result }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /executors/me/availability:
+    get:
+      tags: [Executors]
+      summary: Read executor eligibility and availability
+      operationId: getExecutorAvailability
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: Executor profile }
+        "403": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [Executors]
+      summary: Update executor availability, shift and service zones
+      operationId: updateExecutorAvailability
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: Updated executor profile }
+        "403": { $ref: "#/components/responses/Error" }
+  /executors/me/heartbeat:
+    post:
+      tags: [Executors]
+      summary: Mark an executor online
+      operationId: executorHeartbeat
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: Heartbeat accepted }
+        "403": { $ref: "#/components/responses/Error" }
+  /devices/push-token:
+    post:
+      tags: [Notifications]
+      summary: Register or transfer an Android FCM token
+      operationId: registerPushToken
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: Registered device }
+        "401": { $ref: "#/components/responses/Error" }
+  /operations/executors:
+    get:
+      tags: [Operations]
+      summary: List executors and their eligibility
+      operationId: listExecutors
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: Executor list }
+        "403": { $ref: "#/components/responses/Error" }
+  /operations/executors/{id}:
+    patch:
+      tags: [Operations]
+      summary: Verify and activate an executor
+      operationId: manageExecutor
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: Updated executor }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /operations/orders/retry-confirmed:
+    post:
+      tags: [Operations]
+      summary: Retry every confirmed order awaiting assignment
+      operationId: retryConfirmedOrders
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: Batch matching result }
+        "403": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     bearerAuth:
@@ -1103,6 +1189,22 @@ components:
       properties:
         orderId: { type: string }
         executorId: { type: string }
+        beforePhotoUri: { type: string, minLength: 3 }
+        beforePhotoBase64:
+          type: string
+          contentEncoding: base64
+          maxLength: 14000000
+        beforeFileName: { type: string, maxLength: 120 }
+        beforeMimeType:
+          type: string
+          enum: [image/jpeg, image/png, image/webp, video/mp4]
+        beforeAnalysisFramesBase64:
+          type: array
+          maxItems: 6
+          items:
+            type: string
+            contentEncoding: base64
+            maxLength: 2000000
         photoUri: { type: string, minLength: 3 }
         photoBase64:
           type: string
@@ -1114,7 +1216,7 @@ components:
           enum: [image/jpeg, image/png, image/webp, video/mp4]
         analysisFramesBase64:
           type: array
-          maxItems: 5
+          maxItems: 6
           description: Required for MP4. Representative frames encoded as JPEG base64.
           items:
             type: string

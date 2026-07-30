@@ -19,9 +19,13 @@ test("AI modules expose safe deterministic fallback without an API key", async (
       serviceTitle: "Standard cleaning",
       checklist: ["Kitchen", "Bathroom"],
       mediaType: "image/png",
-      images: ["data:image/png;base64,AAAA"]
+      beforeImages: ["data:image/png;base64,AAAA"],
+      afterImages: ["data:image/png;base64,BBBB"]
     });
     assert.equal(quality.mode, "FALLBACK");
+    assert.equal(quality.data.score, null);
+    assert.equal(quality.data.manualReviewRequired, true);
+    assert.equal(quality.data.improvementDetected, null);
     assert.equal(quality.data.checklistAssessment.length, 2);
     assert.equal(quality.data.checklistAssessment[0]?.status, "UNCLEAR");
 
@@ -48,6 +52,8 @@ test("AI modules expose safe deterministic fallback without an API key", async (
       currentActiveOrders: 3
     });
     assert.equal(forecast.data.days.length, 3);
+    assert.equal(forecast.data.insufficientData, true);
+    assert.equal(forecast.data.historyOrders, 6);
 
     const nlp = await analyzeReview({
       reviewId: "review-test",

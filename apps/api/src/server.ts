@@ -35,6 +35,7 @@ import {
 } from "./ai.js";
 import { decodeAndValidateProofImage, decodeAndValidateProofMedia, extensionForProofMimeType } from "./media.js";
 import { isStrongPassword, PASSWORD_MAX_LENGTH } from "./passwordPolicy.js";
+import { getPushStatus, sendPush } from "./push.js";
 
 export const prisma = new PrismaClient();
 export const app = Fastify({
@@ -132,11 +133,16 @@ const paymentKindByMethod = {
 const submitProofSchema = z.object({
   orderId: z.string(),
   executorId: z.string().optional(),
+  beforePhotoUri: z.string().min(3).optional(),
+  beforePhotoBase64: z.string().min(4).max(14_000_000).optional(),
+  beforeFileName: z.string().max(120).optional(),
+  beforeMimeType: z.enum(["image/jpeg", "image/png", "image/webp", "video/mp4"]).optional(),
+  beforeAnalysisFramesBase64: z.array(z.string().min(4).max(2_000_000)).max(6).default([]),
   photoUri: z.string().min(3),
   photoBase64: z.string().min(4).max(14_000_000),
   fileName: z.string().max(120).optional(),
   mimeType: z.enum(["image/jpeg", "image/png", "image/webp", "video/mp4"]),
-  analysisFramesBase64: z.array(z.string().min(4).max(2_000_000)).max(5).default([]),
+  analysisFramesBase64: z.array(z.string().min(4).max(2_000_000)).max(6).default([]),
   notes: z.string().max(500).optional(),
   checklist: z.array(z.string().min(1).max(120)).min(1).max(30)
 }).superRefine((value, context) => {
@@ -145,6 +151,24 @@ const submitProofSchema = z.object({
       code: "custom",
       path: ["analysisFramesBase64"],
       message: "At least one representative frame is required for video analysis"
+    });
+  }
+  if (value.beforePhotoBase64 && !value.beforeMimeType) {
+    context.addIssue({
+      code: "custom",
+      path: ["beforeMimeType"],
+      message: "beforeMimeType is required with beforePhotoBase64"
+    });
+  }
+  if (
+    value.beforeMimeType === "video/mp4" &&
+    value.beforePhotoBase64 &&
+    value.beforeAnalysisFramesBase64.length === 0
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["beforeAnalysisFramesBase64"],
+      message: "At least one representative frame is required for before video analysis"
     });
   }
 });
@@ -161,6 +185,39 @@ const markNotificationSchema = z.object({
 
 const manualAssignSchema = z.object({
   executorId: z.string()
+});
+
+const executorAvailabilitySchema = z.object({
+  acceptingJobs: z.boolean(),
+  serviceZones: z.array(z.string().trim().min(2).max(80)).max(20).default([]),
+  shiftStartsAt: z.string().datetime().nullable().optional(),
+  shiftEndsAt: z.string().datetime().nullable().optional()
+}).superRefine((value, context) => {
+  if (
+    value.shiftStartsAt &&
+    value.shiftEndsAt &&
+    new Date(value.shiftStartsAt) >= new Date(value.shiftEndsAt)
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["shiftEndsAt"],
+      message: "shiftEndsAt must be after shiftStartsAt"
+    });
+  }
+});
+
+const manageExecutorSchema = z.object({
+  verified: z.boolean().optional(),
+  active: z.boolean().optional(),
+  acceptingJobs: z.boolean().optional(),
+  serviceZones: z.array(z.string().trim().min(2).max(80)).max(20).optional(),
+  shiftStartsAt: z.string().datetime().nullable().optional(),
+  shiftEndsAt: z.string().datetime().nullable().optional()
+});
+
+const pushDeviceSchema = z.object({
+  token: z.string().trim().min(32).max(4096),
+  platform: z.enum(["ANDROID"]).default("ANDROID")
 });
 
 const createReviewSchema = z.object({
@@ -183,7 +240,19 @@ const publicUserSelect = {
   rating: true,
   distanceKm: true,
   activeOrders: true,
-  completedOrders: true
+  completedOrders: true,
+  executorProfile: {
+    select: {
+      verified: true,
+      active: true,
+      acceptingJobs: true,
+      online: true,
+      serviceZones: true,
+      shiftStartsAt: true,
+      shiftEndsAt: true,
+      lastSeenAt: true
+    }
+  }
 } satisfies Prisma.UserSelect;
 
 const publicOrderInclude = {
@@ -298,6 +367,7 @@ function assertSelfOrRole(
 
 async function saveProofMedia(input: {
   orderId: string;
+  stage: "BEFORE" | "AFTER";
   photoUri: string;
   photoBase64: string;
   fileName?: string;
@@ -313,7 +383,7 @@ async function saveProofMedia(input: {
   await writeFile(new URL(fileName, proofStorageDir), buffer);
 
   return {
-    kind: mimeType === "video/mp4" ? "VIDEO_FILE" : "PHOTO_FILE",
+    kind: `${input.stage}_${mimeType === "video/mp4" ? "VIDEO" : "PHOTO"}`,
     uri: `storage://proofs/${fileName}`,
     stored: true,
     sizeBytes: buffer.length,
@@ -412,7 +482,7 @@ async function createNotification(input: {
   metadata?: Prisma.InputJsonValue;
 }) {
   if (!input.userId) return null;
-  return prisma.notification.create({
+  const notification = await prisma.notification.create({
     data: {
       userId: input.userId,
       type: input.type,
@@ -421,6 +491,441 @@ async function createNotification(input: {
       metadata: input.metadata ?? {}
     }
   });
+  void (async () => {
+    try {
+      const devices = await prisma.pushDevice.findMany({
+        where: { userId: input.userId!, enabled: true },
+        select: { token: true }
+      });
+      const result = await sendPush({
+        tokens: devices.map((device) => device.token),
+        title: input.title,
+        body: input.body,
+        data: {
+          type: input.type,
+          notificationId: notification.id,
+          ...(typeof input.metadata === "object" && input.metadata !== null
+            ? Object.fromEntries(
+                Object.entries(input.metadata)
+                  .filter(([, value]) => ["string", "number", "boolean"].includes(typeof value))
+                  .map(([key, value]) => [key, String(value)])
+              )
+            : {})
+        }
+      });
+      if (result.invalidTokens.length > 0) {
+        await prisma.pushDevice.updateMany({
+          where: { token: { in: result.invalidTokens } },
+          data: { enabled: false }
+        });
+      }
+      if (result.warning && result.warning !== "FCM_NOT_CONFIGURED") {
+        app.log.warn({ warning: result.warning, userId: input.userId }, "push delivery warning");
+      }
+    } catch (error) {
+      app.log.warn({ error, userId: input.userId }, "push delivery failed");
+    }
+  })();
+  return notification;
+}
+
+type AssignmentOrder = {
+  id: string;
+  status: OrderStatus;
+  version: number;
+  clientId: string;
+  serviceZone: string | null;
+  scheduledAt: Date | null;
+};
+
+const EXECUTOR_RECENTLY_ONLINE_MS = 5 * 60 * 1000;
+
+async function rankedEligibleExecutors(
+  tx: Prisma.TransactionClient,
+  order: Pick<AssignmentOrder, "serviceZone" | "scheduledAt">
+) {
+  const executors = await tx.user.findMany({
+    where: {
+      role: Role.EXECUTOR,
+      executorProfile: {
+        is: {
+          verified: true,
+          active: true,
+          acceptingJobs: true
+        }
+      }
+    },
+    include: { executorProfile: true }
+  });
+  const assignmentTime = order.scheduledAt ?? new Date();
+  const recentCutoff = Date.now() - EXECUTOR_RECENTLY_ONLINE_MS;
+
+  return executors
+    .filter((executor) => {
+      const profile = executor.executorProfile;
+      if (!profile) return false;
+      if (
+        order.serviceZone &&
+        profile.serviceZones.length > 0 &&
+        !profile.serviceZones.includes(order.serviceZone)
+      ) {
+        return false;
+      }
+      if (profile.shiftStartsAt && assignmentTime < profile.shiftStartsAt) return false;
+      if (profile.shiftEndsAt && assignmentTime > profile.shiftEndsAt) return false;
+      return true;
+    })
+    .map((executor) => {
+      const recentlyOnline =
+        executor.executorProfile?.lastSeenAt &&
+        executor.executorProfile.lastSeenAt.getTime() >= recentCutoff;
+      const availabilityBoost = executor.executorProfile?.online && recentlyOnline ? 8 : 0;
+      return {
+        executor,
+        score:
+          scoreExecutor({
+            id: executor.id,
+            name: executor.name,
+            distanceKm: executor.distanceKm,
+            rating: executor.rating,
+            activeOrders: executor.activeOrders,
+            completedOrders: executor.completedOrders
+          }) + availabilityBoost,
+        recentlyOnline: Boolean(recentlyOnline)
+      };
+    })
+    .sort((a, b) => b.score - a.score);
+}
+
+async function assignConfirmedOrderInTransaction(
+  tx: Prisma.TransactionClient,
+  order: AssignmentOrder,
+  actorId: string | null,
+  trigger: string
+) {
+  const ranked = await rankedEligibleExecutors(tx, order);
+  const best = ranked[0];
+  if (!best) {
+    await tx.auditEvent.create({
+      data: {
+        actorId,
+        action: "ORDER_ASSIGNMENT_PENDING",
+        target: `order:${order.id}`,
+        metadata: {
+          trigger,
+          reason: "NO_ELIGIBLE_EXECUTOR",
+          serviceZone: order.serviceZone
+        }
+      }
+    });
+    return null;
+  }
+
+  await applyOrderTransition(tx, {
+    order,
+    toStatus: OrderStatus.ASSIGNED,
+    context: "MATCHING",
+    actorId,
+    reason: `Executor selected by eligibility and matching rules (${trigger})`,
+    metadata: {
+      executorId: best.executor.id,
+      score: best.score,
+      recentlyOnline: best.recentlyOnline
+    },
+    data: { executorId: best.executor.id }
+  });
+  await tx.aiEvent.create({
+    data: {
+      orderId: order.id,
+      module: "AI_MATCHING_RULES",
+      input: {
+        orderId: order.id,
+        trigger,
+        serviceZone: order.serviceZone,
+        scheduledAt: order.scheduledAt
+      },
+      output: {
+        executorId: best.executor.id,
+        score: best.score,
+        eligibility: {
+          verified: true,
+          active: true,
+          acceptingJobs: true,
+          recentlyOnline: best.recentlyOnline
+        },
+        ranked: ranked.map((item) => ({
+          id: item.executor.id,
+          score: item.score,
+          recentlyOnline: item.recentlyOnline
+        }))
+      },
+      explanation: [
+        "Only verified, active executors accepting jobs inside their shift and service zone were considered.",
+        "Distance, rating, current load, completed orders, and recent heartbeat were scored."
+      ]
+    }
+  });
+  await tx.user.update({
+    where: { id: best.executor.id },
+    data: { activeOrders: { increment: 1 } }
+  });
+  await tx.auditEvent.create({
+    data: {
+      actorId,
+      action: "ORDER_AUTOMATICALLY_ASSIGNED",
+      target: `order:${order.id}`,
+      metadata: {
+        trigger,
+        executorId: best.executor.id,
+        score: best.score
+      }
+    }
+  });
+  return {
+    executorId: best.executor.id,
+    executorName: best.executor.name,
+    score: best.score
+  };
+}
+
+async function confirmPlaceholderAndAssign(orderId: string, actorId: string) {
+  const transactionResult = await prisma.$transaction(async (tx) => {
+    const current = await tx.order.findUnique({ where: { id: orderId } });
+    if (!current) throw apiError("ORDER_NOT_FOUND", "Order not found", 404);
+
+    if (
+      current.status !== OrderStatus.PRICED &&
+      current.status !== OrderStatus.CONFIRMED
+    ) {
+      return { assignment: null, alreadyProcessed: true };
+    }
+
+    let confirmed: AssignmentOrder = current;
+    if (current.status === OrderStatus.PRICED) {
+      const existingPayment = await tx.payment.findFirst({
+        where: {
+          orderId,
+          kind: PaymentKind.CLIENT_KASPI_PLACEHOLDER,
+          status: { in: [PaymentStatus.PENDING, PaymentStatus.PAID] }
+        },
+        orderBy: { createdAt: "desc" }
+      });
+      if (existingPayment) {
+        if (existingPayment.status !== PaymentStatus.PAID) {
+          await tx.payment.update({
+            where: { id: existingPayment.id },
+            data: { status: PaymentStatus.PAID }
+          });
+        }
+      } else {
+        await tx.payment.create({
+          data: {
+            orderId,
+            amount: current.priceTotal,
+            status: PaymentStatus.PAID,
+            kind: PaymentKind.CLIENT_KASPI_PLACEHOLDER,
+            idempotencyKey: `placeholder-confirm-${orderId}`
+          }
+        });
+      }
+      await applyOrderTransition(tx, {
+        order: current,
+        toStatus: OrderStatus.CONFIRMED,
+        context: "PAYMENT_CONFIRMATION",
+        actorId,
+        reason: "Placeholder payment confirmed and order entered matching",
+        metadata: { paymentMethod: "KASPI_PLACEHOLDER", charged: false }
+      });
+      await tx.auditEvent.create({
+        data: {
+          actorId,
+          action: "PLACEHOLDER_PAYMENT_CONFIRMED",
+          target: `order:${orderId}`,
+          metadata: { charged: false }
+        }
+      });
+      confirmed = {
+        ...current,
+        status: OrderStatus.CONFIRMED,
+        version: current.version + 1
+      };
+    }
+
+    const assignment = await assignConfirmedOrderInTransaction(
+      tx,
+      confirmed,
+      actorId,
+      current.status === OrderStatus.PRICED ? "CONFIRM_PLACEHOLDER" : "RETRY_CONFIRMED"
+    );
+    return { assignment, alreadyProcessed: false };
+  });
+
+  const order = await prisma.order.findUniqueOrThrow({
+    where: { id: orderId },
+    include: publicOrderInclude
+  });
+  const payment = await prisma.payment.findFirst({
+    where: {
+      orderId,
+      kind: PaymentKind.CLIENT_KASPI_PLACEHOLDER
+    },
+    orderBy: { createdAt: "desc" }
+  });
+  return {
+    order,
+    payment,
+    matchingStatus: order.status === OrderStatus.CONFIRMED ? "PENDING" : "ASSIGNED",
+    alreadyProcessed: transactionResult.alreadyProcessed,
+    assignment: transactionResult.assignment
+  };
+}
+
+async function notifyAssignmentResult(
+  result: Awaited<ReturnType<typeof confirmPlaceholderAndAssign>>,
+  notifyPending = true
+) {
+  if (!result.assignment) {
+    if (notifyPending && result.order.status === OrderStatus.CONFIRMED) {
+      await createNotification({
+        userId: result.order.clientId,
+        type: "MATCHING_PENDING",
+        title: "Ищем подходящего исполнителя",
+        body: "Заказ подтверждён. Подбор продолжится автоматически, когда появится доступный исполнитель.",
+        metadata: { orderId: result.order.id }
+      });
+    }
+    return;
+  }
+  await Promise.all([
+    createNotification({
+      userId: result.assignment.executorId,
+      type: "ORDER_ASSIGNED",
+      title: "Новый назначенный заказ",
+      body: `Вам назначен заказ ${result.order.id}.`,
+      metadata: { orderId: result.order.id, score: result.assignment.score }
+    }),
+    createNotification({
+      userId: result.order.clientId,
+      type: "EXECUTOR_ASSIGNED",
+      title: "Исполнитель назначен",
+      body: `На ваш заказ назначен исполнитель ${result.assignment.executorName}.`,
+      metadata: {
+        orderId: result.order.id,
+        executorId: result.assignment.executorId
+      }
+    })
+  ]);
+}
+
+async function notifyAiFailure(input: {
+  module: string;
+  warning: string | null;
+  orderId?: string | null;
+}) {
+  if (!input.warning || input.warning.startsWith("INSUFFICIENT_HISTORY")) return;
+  const recipients = await prisma.user.findMany({
+    where: {
+      role: {
+        in: [
+          Role.OPERATOR,
+          Role.QUALITY_MANAGER,
+          Role.MANAGER,
+          Role.ADMIN
+        ]
+      }
+    },
+    select: { id: true }
+  });
+  if (recipients.length === 0) return;
+  await prisma.notification.createMany({
+    data: recipients.map((recipient) => ({
+      userId: recipient.id,
+      type: "AI_PROVIDER_WARNING",
+      title: `AI-модуль ${input.module} требует внимания`,
+      body: `OpenAI-анализ не завершён: ${input.warning}`,
+      metadata: {
+        module: input.module,
+        orderId: input.orderId ?? null,
+        warning: input.warning
+      }
+    }))
+  });
+}
+
+async function runAndStoreOrderRisk(orderId: string, trigger: string) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: {
+      executor: {
+        select: {
+          activeOrders: true,
+          rating: true,
+          completedOrders: true
+        }
+      }
+    }
+  });
+  if (!order) return null;
+  const [previousDisputes, clientReviewStats, clientOrderCount] = await Promise.all([
+    prisma.dispute.count({ where: { orderId } }),
+    prisma.review.aggregate({
+      where: { clientId: order.clientId },
+      _avg: { rating: true }
+    }),
+    prisma.order.count({ where: { clientId: order.clientId } })
+  ]);
+  const risk = await assessOrderRisk({
+    orderId,
+    status: order.status,
+    urgent: order.urgent,
+    complexityScore: order.complexityScore,
+    priceTotal: order.priceTotal,
+    hasExecutor: Boolean(order.executorId),
+    executorActiveOrders: order.executor?.activeOrders,
+    executorRating: order.executor?.rating,
+    executorCompletedOrders: order.executor?.completedOrders,
+    clientOrderCount,
+    clientAverageRating: clientReviewStats._avg.rating ?? undefined,
+    previousDisputes
+  });
+  const event = await prisma.aiEvent.create({
+    data: {
+      orderId,
+      module: "ORDER_RISK",
+      input: {
+        trigger,
+        status: order.status,
+        urgent: order.urgent,
+        complexityScore: order.complexityScore,
+        previousDisputes,
+        clientOrderCount,
+        clientAverageRating: clientReviewStats._avg.rating,
+        executorActiveOrders: order.executor?.activeOrders ?? null
+      },
+      output: jsonValue(risk),
+      explanation: [
+        `Trigger: ${trigger}`,
+        risk.data.summary,
+        ...risk.data.reasons,
+        ...risk.data.recommendedActions
+      ]
+    }
+  });
+  await notifyAiFailure({
+    module: "ORDER_RISK",
+    warning: risk.warning,
+    orderId
+  });
+  return { risk, event };
+}
+
+async function safelyTriggerOrderRisk(orderId: string, trigger: string) {
+  try {
+    return await runAndStoreOrderRisk(orderId, trigger);
+  } catch (error) {
+    app.log.error({ error, orderId, trigger }, "order-risk trigger failed");
+    return null;
+  }
 }
 
 app.get("/health", async () => {
@@ -428,7 +933,58 @@ app.get("/health", async () => {
 });
 
 app.get("/ai/status", async () => {
-  return getAiStatus();
+  let databaseWarning: string | null = null;
+  const recentFallbacks = await prisma.aiEvent.findMany({
+    where: {
+      module: {
+        in: ["QUALITY_VISION", "ORDER_RISK", "DEMAND_FORECAST", "REVIEW_NLP"]
+      }
+    },
+    orderBy: { createdAt: "desc" },
+    take: 50,
+    select: {
+      id: true,
+      orderId: true,
+      module: true,
+      output: true,
+      createdAt: true
+    }
+  }).catch((error: unknown) => {
+    databaseWarning =
+      error instanceof Error
+        ? error.message.slice(0, 240)
+        : "AI event history is unavailable";
+    return [];
+  });
+  const warnings = recentFallbacks
+    .map((event) => {
+      const output = event.output as {
+        mode?: unknown;
+        warning?: unknown;
+        model?: unknown;
+      };
+      if (output.mode !== "FALLBACK" || typeof output.warning !== "string") return null;
+      return {
+        eventId: event.id,
+        orderId: event.orderId,
+        module: event.module,
+        warning: output.warning,
+        model: typeof output.model === "string" ? output.model : null,
+        createdAt: event.createdAt
+      };
+    })
+    .filter((warning): warning is NonNullable<typeof warning> => warning !== null)
+    .slice(0, 10);
+  return {
+    ...getAiStatus(),
+    push: getPushStatus(),
+    healthy:
+      Boolean(process.env.OPENAI_API_KEY?.trim()) &&
+      warnings.length === 0 &&
+      databaseWarning === null,
+    recentWarnings: warnings,
+    databaseWarning
+  };
 });
 
 app.get("/geo/geocode", async (request) => {
@@ -485,7 +1041,18 @@ app.post("/auth/demo-login", async (request) => {
       data: {
         name: `Demo ${input.role.toLowerCase()}`,
         email: `${input.role.toLowerCase()}@ai-cleaning.local`,
-        role: input.role as Role
+        role: input.role as Role,
+        executorProfile: input.role === "EXECUTOR"
+          ? {
+              create: {
+                verified: true,
+                active: true,
+                acceptingJobs: true,
+                online: true,
+                lastSeenAt: new Date()
+              }
+            }
+          : undefined
       }
     });
   const session = await createSession(created.id);
@@ -513,7 +1080,18 @@ app.post("/auth/register", async (request) => {
       email: input.email,
       phone: input.phone,
       passwordHash: hashPassword(input.password),
-      role: input.role as Role
+      role: input.role as Role,
+      executorProfile: input.role === "EXECUTOR"
+        ? {
+            create: {
+              verified: false,
+              active: false,
+              acceptingJobs: false,
+              online: true,
+              lastSeenAt: new Date()
+            }
+          }
+        : undefined
     }
   });
   const session = await createSession(user.id);
@@ -645,6 +1223,154 @@ app.post("/auth/logout", async (request) => {
   return { ok: true };
 });
 
+app.get("/executors/me/availability", async (request) => {
+  const user = await requireUser(request);
+  requireAnyRole(user, [Role.EXECUTOR]);
+  const profile = await prisma.executorProfile.upsert({
+    where: { userId: user.id },
+    create: { userId: user.id, online: true, lastSeenAt: new Date() },
+    update: { online: true, lastSeenAt: new Date() }
+  });
+  return { profile };
+});
+
+app.patch("/executors/me/availability", async (request) => {
+  const user = await requireUser(request);
+  requireAnyRole(user, [Role.EXECUTOR]);
+  const input = executorAvailabilitySchema.parse(request.body);
+  const profile = await prisma.executorProfile.upsert({
+    where: { userId: user.id },
+    create: {
+      userId: user.id,
+      acceptingJobs: input.acceptingJobs,
+      online: true,
+      lastSeenAt: new Date(),
+      serviceZones: input.serviceZones,
+      shiftStartsAt: input.shiftStartsAt ? new Date(input.shiftStartsAt) : null,
+      shiftEndsAt: input.shiftEndsAt ? new Date(input.shiftEndsAt) : null
+    },
+    update: {
+      acceptingJobs: input.acceptingJobs,
+      online: true,
+      lastSeenAt: new Date(),
+      serviceZones: input.serviceZones,
+      shiftStartsAt: input.shiftStartsAt ? new Date(input.shiftStartsAt) : null,
+      shiftEndsAt: input.shiftEndsAt ? new Date(input.shiftEndsAt) : null
+    }
+  });
+  await prisma.auditEvent.create({
+    data: {
+      actorId: user.id,
+      action: "EXECUTOR_AVAILABILITY_UPDATED",
+      target: `user:${user.id}`,
+      metadata: {
+        acceptingJobs: profile.acceptingJobs,
+        serviceZones: profile.serviceZones,
+        shiftStartsAt: profile.shiftStartsAt,
+        shiftEndsAt: profile.shiftEndsAt
+      }
+    }
+  });
+  return { profile };
+});
+
+app.post("/executors/me/heartbeat", async (request) => {
+  const user = await requireUser(request);
+  requireAnyRole(user, [Role.EXECUTOR]);
+  const profile = await prisma.executorProfile.upsert({
+    where: { userId: user.id },
+    create: { userId: user.id, online: true, lastSeenAt: new Date() },
+    update: { online: true, lastSeenAt: new Date() }
+  });
+  return {
+    ok: true,
+    serverTime: new Date(),
+    eligible:
+      profile.verified &&
+      profile.active &&
+      profile.acceptingJobs
+  };
+});
+
+app.post("/devices/push-token", async (request) => {
+  const user = await requireUser(request);
+  const input = pushDeviceSchema.parse(request.body);
+  const device = await prisma.pushDevice.upsert({
+    where: { token: input.token },
+    create: {
+      userId: user.id,
+      token: input.token,
+      platform: input.platform
+    },
+    update: {
+      userId: user.id,
+      platform: input.platform,
+      enabled: true
+    }
+  });
+  return { device: { id: device.id, platform: device.platform, enabled: device.enabled } };
+});
+
+app.get("/operations/executors", async (request) => {
+  const user = await requireUser(request);
+  requireAnyRole(user, OPERATION_ROLES);
+  return prisma.user.findMany({
+    where: { role: Role.EXECUTOR },
+    orderBy: [{ createdAt: "desc" }],
+    select: publicUserSelect
+  });
+});
+
+app.patch("/operations/executors/:id", async (request) => {
+  const user = await requireUser(request);
+  requireAnyRole(user, OPERATION_ROLES);
+  const { id } = request.params as { id: string };
+  const input = manageExecutorSchema.parse(request.body);
+  const executor = await prisma.user.findUnique({ where: { id } });
+  if (!executor || executor.role !== Role.EXECUTOR) {
+    throw apiError("EXECUTOR_NOT_FOUND", "Executor not found", 404);
+  }
+  const profile = await prisma.executorProfile.upsert({
+    where: { userId: id },
+    create: {
+      userId: id,
+      verified: input.verified ?? false,
+      active: input.active ?? false,
+      acceptingJobs: input.acceptingJobs ?? false,
+      serviceZones: input.serviceZones ?? [],
+      shiftStartsAt: input.shiftStartsAt ? new Date(input.shiftStartsAt) : null,
+      shiftEndsAt: input.shiftEndsAt ? new Date(input.shiftEndsAt) : null
+    },
+    update: {
+      verified: input.verified,
+      active: input.active,
+      acceptingJobs: input.acceptingJobs,
+      serviceZones: input.serviceZones,
+      shiftStartsAt:
+        input.shiftStartsAt === undefined
+          ? undefined
+          : input.shiftStartsAt
+            ? new Date(input.shiftStartsAt)
+            : null,
+      shiftEndsAt:
+        input.shiftEndsAt === undefined
+          ? undefined
+          : input.shiftEndsAt
+            ? new Date(input.shiftEndsAt)
+            : null
+    }
+  });
+  await prisma.auditEvent.create({
+    data: {
+      actorId: user.id,
+      action: "EXECUTOR_ELIGIBILITY_UPDATED",
+      target: `user:${id}`,
+      metadata: jsonValue(input)
+    }
+  });
+  return { executor: { ...publicUser(executor), executorProfile: profile } };
+});
+
 app.get("/orders", async (request) => {
   const user = await requireUser(request);
   const where = orderScopeForRole(user);
@@ -668,7 +1394,12 @@ app.get("/clients/:clientId/orders", async (request) => {
       executor: { select: publicUserSelect },
       payments: true,
       qualityChecks: true,
-      reviews: true
+      reviews: true,
+      aiEvents: {
+        where: { module: { in: ["QUALITY_VISION", "ORDER_RISK"] } },
+        orderBy: { createdAt: "desc" },
+        take: 6
+      }
     }
   });
 });
@@ -821,9 +1552,23 @@ app.post("/operations/orders/:id/manual-assign", async (request) => {
   requireAnyRole(user, OPERATION_ROLES);
   const { id } = request.params as { id: string };
   const input = manualAssignSchema.parse(request.body);
-  const executor = await prisma.user.findUnique({ where: { id: input.executorId } });
+  const executor = await prisma.user.findUnique({
+    where: { id: input.executorId },
+    include: { executorProfile: true }
+  });
   if (!executor || executor.role !== Role.EXECUTOR) {
     throw apiError("EXECUTOR_NOT_FOUND", "Executor not found", 404);
+  }
+  if (
+    !executor.executorProfile?.verified ||
+    !executor.executorProfile.active ||
+    !executor.executorProfile.acceptingJobs
+  ) {
+    throw apiError(
+      "EXECUTOR_NOT_ELIGIBLE",
+      "Executor must be verified, active, and accepting jobs",
+      409
+    );
   }
   const existingOrder = await prisma.order.findUnique({ where: { id } });
   if (!existingOrder) throw apiError("ORDER_NOT_FOUND", "Order not found", 404);
@@ -992,8 +1737,59 @@ app.post("/orders", async (request) => {
     body: `Стоимость заказа «${order.service.title}» — ${order.priceTotal} ${appConfig.currency}.`,
     metadata: { orderId: order.id, status: order.status }
   });
+  await safelyTriggerOrderRisk(order.id, "ORDER_CREATED");
 
   return { order };
+});
+
+app.post("/orders/:id/confirm-placeholder", async (request) => {
+  const user = await requireUser(request);
+  requireAnyRole(user, [Role.CLIENT]);
+  const { id } = request.params as { id: string };
+  const existing = await prisma.order.findUnique({ where: { id } });
+  if (!existing) throw apiError("ORDER_NOT_FOUND", "Order not found", 404);
+  if (existing.clientId !== user.id) {
+    throw apiError("ORDER_FORBIDDEN", "Client does not own order", 403);
+  }
+  const result = await confirmPlaceholderAndAssign(id, user.id);
+  await notifyAssignmentResult(result);
+  await safelyTriggerOrderRisk(
+    id,
+    result.order.status === OrderStatus.ASSIGNED
+      ? "ORDER_CONFIRMED_AND_ASSIGNED"
+      : "ORDER_CONFIRMED_MATCHING_PENDING"
+  );
+  return result;
+});
+
+app.post("/orders/:id/retry-assignment", async (request) => {
+  const user = await requireUser(request);
+  const { id } = request.params as { id: string };
+  const existing = await prisma.order.findUnique({ where: { id } });
+  if (!existing) throw apiError("ORDER_NOT_FOUND", "Order not found", 404);
+  const allowed =
+    (user.role === Role.CLIENT && existing.clientId === user.id) ||
+    hasAnyRole(user, OPERATION_ROLES);
+  if (!allowed) {
+    throw apiError("ORDER_ASSIGN_FORBIDDEN", "You cannot retry this order", 403);
+  }
+  if (existing.status !== OrderStatus.CONFIRMED) {
+    throw apiError(
+      "ORDER_NOT_AWAITING_ASSIGNMENT",
+      "Only a confirmed order can be put back into matching",
+      409,
+      { status: existing.status }
+    );
+  }
+  const result = await confirmPlaceholderAndAssign(id, user.id);
+  await notifyAssignmentResult(result);
+  await safelyTriggerOrderRisk(
+    id,
+    result.order.status === OrderStatus.ASSIGNED
+      ? "ORDER_REASSIGNED"
+      : "ORDER_RETRY_NO_EXECUTOR"
+  );
+  return result;
 });
 
 app.post("/orders/:id/assign", async (request) => {
@@ -1008,18 +1804,53 @@ app.post("/orders/:id/assign", async (request) => {
     throw apiError("ORDER_ASSIGN_FORBIDDEN", "You cannot assign this order", 403);
   }
   assertOrderTransition(existingOrder.status, OrderStatus.ASSIGNED, "MATCHING");
-  const executors = await prisma.user.findMany({ where: { role: Role.EXECUTOR } });
+  const executors = await prisma.user.findMany({
+    where: {
+      role: Role.EXECUTOR,
+      executorProfile: {
+        is: {
+          verified: true,
+          active: true,
+          acceptingJobs: true
+        }
+      }
+    },
+    include: { executorProfile: true }
+  });
+  const assignmentTime = existingOrder.scheduledAt ?? new Date();
   const ranked = executors
+    .filter((executor) => {
+      const profile = executor.executorProfile;
+      if (!profile) return false;
+      if (
+        existingOrder.serviceZone &&
+        profile.serviceZones.length > 0 &&
+        !profile.serviceZones.includes(existingOrder.serviceZone)
+      ) {
+        return false;
+      }
+      if (profile.shiftStartsAt && assignmentTime < profile.shiftStartsAt) return false;
+      if (profile.shiftEndsAt && assignmentTime > profile.shiftEndsAt) return false;
+      return true;
+    })
     .map((executor) => ({
       executor,
-      score: scoreExecutor({
-        id: executor.id,
-        name: executor.name,
-        distanceKm: executor.distanceKm,
-        rating: executor.rating,
-        activeOrders: executor.activeOrders,
-        completedOrders: executor.completedOrders
-      })
+      score:
+        scoreExecutor({
+          id: executor.id,
+          name: executor.name,
+          distanceKm: executor.distanceKm,
+          rating: executor.rating,
+          activeOrders: executor.activeOrders,
+          completedOrders: executor.completedOrders
+        }) +
+        (
+          executor.executorProfile?.online &&
+          executor.executorProfile.lastSeenAt &&
+          executor.executorProfile.lastSeenAt.getTime() >= Date.now() - EXECUTOR_RECENTLY_ONLINE_MS
+            ? 8
+            : 0
+        )
     }))
     .sort((a, b) => b.score - a.score);
 
@@ -1097,6 +1928,33 @@ app.post("/orders/:id/assign", async (request) => {
   ]);
 
   return { order };
+});
+
+app.post("/operations/orders/retry-confirmed", async (request) => {
+  const user = await requireUser(request);
+  requireAnyRole(user, OPERATION_ROLES);
+  const confirmed = await prisma.order.findMany({
+    where: { status: OrderStatus.CONFIRMED },
+    orderBy: { updatedAt: "asc" },
+    take: 100,
+    select: { id: true }
+  });
+  const results = [];
+  for (const order of confirmed) {
+    const result = await confirmPlaceholderAndAssign(order.id, user.id);
+    await notifyAssignmentResult(result);
+    results.push({
+      orderId: order.id,
+      status: result.order.status,
+      matchingStatus: result.matchingStatus,
+      executorId: result.order.executorId
+    });
+  }
+  return {
+    processed: results.length,
+    assigned: results.filter((result) => result.matchingStatus === "ASSIGNED").length,
+    results
+  };
 });
 
 app.post("/orders/:id/status", async (request) => {
@@ -1429,19 +2287,41 @@ app.post("/quality/proof", async (request) => {
 
   const storedMedia = await saveProofMedia({
     orderId: order.id,
+    stage: "AFTER",
     photoUri: input.photoUri,
     photoBase64: input.photoBase64,
     fileName: input.fileName,
     mimeType: input.mimeType
   });
+  const storedBeforeMedia =
+    input.beforePhotoBase64 && input.beforeMimeType
+      ? await saveProofMedia({
+          orderId: order.id,
+          stage: "BEFORE",
+          photoUri: input.beforePhotoUri ?? "android://proof/before",
+          photoBase64: input.beforePhotoBase64,
+          fileName: input.beforeFileName,
+          mimeType: input.beforeMimeType
+        })
+      : null;
 
-  const analysisImages =
+  const afterAnalysisImages =
     storedMedia.mimeType === "video/mp4"
       ? input.analysisFramesBase64.map((frame) => {
           const validated = decodeAndValidateProofImage(frame, "image/jpeg");
           return `data:${validated.mimeType};base64,${validated.buffer.toString("base64")}`;
         })
       : [`data:${storedMedia.mimeType};base64,${input.photoBase64.replace(/\s+/g, "")}`];
+  const beforeAnalysisImages = storedBeforeMedia
+    ? storedBeforeMedia.mimeType === "video/mp4"
+      ? input.beforeAnalysisFramesBase64.map((frame) => {
+          const validated = decodeAndValidateProofImage(frame, "image/jpeg");
+          return `data:${validated.mimeType};base64,${validated.buffer.toString("base64")}`;
+        })
+      : [
+          `data:${storedBeforeMedia.mimeType};base64,${input.beforePhotoBase64?.replace(/\s+/g, "") ?? ""}`
+        ]
+    : [];
 
   const vision = await analyzeQualityVision({
     orderId: order.id,
@@ -1449,7 +2329,8 @@ app.post("/quality/proof", async (request) => {
     checklist: input.checklist,
     notes: input.notes,
     mediaType: storedMedia.mimeType,
-    images: analysisImages
+    beforeImages: beforeAnalysisImages,
+    afterImages: afterAnalysisImages
   });
   const [previousDisputes, clientReviewStats, clientOrderCount] = await Promise.all([
     prisma.dispute.count({ where: { orderId: order.id } }),
@@ -1476,6 +2357,16 @@ app.post("/quality/proof", async (request) => {
   });
   const checklistScore = vision.data.score;
   const result = await prisma.$transaction(async (tx) => {
+    if (storedBeforeMedia) {
+      await tx.proofAsset.create({
+        data: {
+          orderId: order.id,
+          kind: storedBeforeMedia.kind,
+          uri: storedBeforeMedia.uri,
+          notes: input.notes
+        }
+      });
+    }
     const proof = await tx.proofAsset.create({
       data: {
         orderId: order.id,
@@ -1500,7 +2391,10 @@ app.post("/quality/proof", async (request) => {
           input: {
             checklist: input.checklist,
             mediaType: storedMedia.mimeType,
-            frameCount: analysisImages.length,
+            beforeFrameCount: beforeAnalysisImages.length,
+            afterFrameCount: afterAnalysisImages.length,
+            hasBeforeAfterPair:
+              beforeAnalysisImages.length > 0 && afterAnalysisImages.length > 0,
             hasNotes: Boolean(input.notes)
           },
           output: jsonValue(vision),
@@ -1567,7 +2461,9 @@ app.post("/quality/proof", async (request) => {
             kind: proof.kind,
             sizeBytes: storedMedia.sizeBytes,
             mimeType: storedMedia.mimeType,
-            frameCount: analysisImages.length
+            beforeFrameCount: beforeAnalysisImages.length,
+            afterFrameCount: afterAnalysisImages.length,
+            beforeUri: storedBeforeMedia?.uri ?? null
           },
           ai: {
             qualityMode: vision.mode,
@@ -1584,13 +2480,17 @@ app.post("/quality/proof", async (request) => {
     where: { id: order.id },
     include: { service: true, qualityChecks: true, proofAssets: true }
   });
+  const scoreText =
+    vision.data.score === null
+      ? "оценка не выставлена, требуется ручная проверка"
+      : `${vision.data.score}/100`;
 
   await Promise.all([
     createNotification({
       userId: order.clientId,
       type: "QUALITY_CHECK",
       title: "Заказ передан на контроль качества",
-      body: `По заказу ${order.id} отправлен медиаотчёт. AI Quality: ${vision.data.score}/100.`,
+      body: `По заказу ${order.id} отправлен медиаотчёт. AI Quality: ${scoreText}.`,
       metadata: {
         orderId: order.id,
         qualityCheckId: qualityCheck.id,
@@ -1603,7 +2503,7 @@ app.post("/quality/proof", async (request) => {
       userId: order.executorId,
       type: "PROOF_SUBMITTED",
       title: "Медиаотчёт отправлен",
-      body: `Ваш отчёт по заказу ${order.id} сохранён. Предварительная AI-оценка: ${vision.data.score}/100.`,
+      body: `Ваш отчёт по заказу ${order.id} сохранён. AI Quality: ${scoreText}.`,
       metadata: {
         orderId: order.id,
         qualityCheckId: qualityCheck.id,
@@ -1611,6 +2511,18 @@ app.post("/quality/proof", async (request) => {
         aiMode: vision.mode,
         aiScore: vision.data.score
       }
+    })
+  ]);
+  await Promise.all([
+    notifyAiFailure({
+      module: "QUALITY_VISION",
+      warning: vision.warning,
+      orderId: order.id
+    }),
+    notifyAiFailure({
+      module: "ORDER_RISK",
+      warning: risk.warning,
+      orderId: order.id
     })
   ]);
 
@@ -1907,6 +2819,71 @@ app.get("/analytics/summary", async (request) => {
   };
 });
 
+async function retryStuckConfirmedOrders() {
+  const retryBefore = new Date(Date.now() - 30_000);
+  const stuck = await prisma.order.findMany({
+    where: {
+      status: OrderStatus.CONFIRMED,
+      updatedAt: { lte: retryBefore }
+    },
+    orderBy: { updatedAt: "asc" },
+    take: 25,
+    select: { id: true, clientId: true }
+  });
+  for (const order of stuck) {
+    try {
+      const result = await confirmPlaceholderAndAssign(order.id, order.clientId);
+      await notifyAssignmentResult(result, false);
+      if (result.assignment) {
+        await safelyTriggerOrderRisk(order.id, "AUTOMATIC_RETRY_ASSIGNED");
+      }
+    } catch (error) {
+      app.log.error({ error, orderId: order.id }, "confirmed-order retry failed");
+    }
+  }
+}
+
+async function scanDelayedOrders() {
+  const delayBefore = new Date(Date.now() - 30 * 60 * 1000);
+  const candidates = await prisma.order.findMany({
+    where: {
+      status: {
+        in: [
+          OrderStatus.CONFIRMED,
+          OrderStatus.ASSIGNED,
+          OrderStatus.ACCEPTED,
+          OrderStatus.IN_PROGRESS,
+          OrderStatus.QUALITY_CHECK
+        ]
+      },
+      OR: [
+        { updatedAt: { lte: delayBefore } },
+        { scheduledAt: { lte: new Date() } }
+      ]
+    },
+    orderBy: { updatedAt: "asc" },
+    take: 25,
+    select: { id: true }
+  });
+  const recentCutoff = new Date(Date.now() - 30 * 60 * 1000);
+  for (const order of candidates) {
+    const recentRisk = await prisma.aiEvent.findFirst({
+      where: {
+        orderId: order.id,
+        module: "ORDER_RISK",
+        createdAt: { gte: recentCutoff }
+      },
+      select: { id: true }
+    });
+    if (recentRisk) continue;
+    try {
+      await safelyTriggerOrderRisk(order.id, "ORDER_DELAY_DETECTED");
+    } catch (error) {
+      app.log.error({ error, orderId: order.id }, "delayed-order AI trigger failed");
+    }
+  }
+}
+
 const port = Number(process.env.PORT ?? 4000);
 
 if (process.env.NODE_ENV !== "test") {
@@ -1915,4 +2892,12 @@ if (process.env.NODE_ENV !== "test") {
     await prisma.$disconnect();
     process.exit(1);
   });
+  const matchingRetryTimer = setInterval(() => {
+    void retryStuckConfirmedOrders();
+  }, 60_000);
+  matchingRetryTimer.unref();
+  const delayScanTimer = setInterval(() => {
+    void scanDelayedOrders();
+  }, 5 * 60_000);
+  delayScanTimer.unref();
 }

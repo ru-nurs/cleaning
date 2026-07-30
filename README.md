@@ -70,10 +70,23 @@ PAYOUT_RATIO=0.72
 OPENAI_API_KEY=<новый секретный серверный ключ>
 OPENAI_MODEL=gpt-5.6-luna
 OPENAI_TIMEOUT_MS=45000
+FIREBASE_PROJECT_ID=<Firebase project id>
+FIREBASE_SERVICE_ACCOUNT_JSON=<полный JSON service account одной строкой>
 ```
 
-Фото и MP4-доказательства MVP сохраняются в `apps/api/storage`. Для MP4 Android передаёт три репрезентативных JPEG-кадра для Vision-анализа. Чтобы медиа не исчезало после перезапуска сервиса, подключите Persistent Disk к `/opt/render/project/src/apps/api/storage`.
+Фото и MP4-доказательства MVP сохраняются в `apps/api/storage`. Android передаёт отдельные
+материалы «до» и «после»; для каждого MP4 извлекаются шесть репрезентативных JPEG-кадров.
+Чтобы медиа не исчезало после перезапуска сервиса, подключите Persistent Disk к
+`/opt/render/project/src/apps/api/storage`.
 
-Если `OPENAI_API_KEY` не задан или провайдер временно недоступен, API продолжит работу в явно помеченном режиме `FALLBACK`. Этот режим не выдаётся за анализ содержимого фотографии. Финальное решение контроля качества всегда принимает менеджер.
+Если `OPENAI_API_KEY` не задан или провайдер временно недоступен, API продолжит работу в
+явно помеченном режиме `FALLBACK`: `score` будет `null`, а ручная проверка — обязательной.
+Этот режим не выдаётся за анализ содержимого фотографии. Финальное решение контроля
+качества всегда принимает менеджер.
+
+FCM необязателен для запуска: без Firebase остаются polling каждые 15 секунд и обновление
+при возвращении в приложение. Для push-уведомлений нужны обе переменные Firebase выше и
+Android-параметры `AI_CLEANING_FIREBASE_APPLICATION_ID`, `AI_CLEANING_FIREBASE_PROJECT_ID`,
+`AI_CLEANING_FIREBASE_API_KEY`, `AI_CLEANING_FIREBASE_SENDER_ID` в `gradle.properties`.
 
 Не добавляйте настоящие `.env`-файлы и секреты в Git.

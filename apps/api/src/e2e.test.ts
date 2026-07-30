@@ -25,6 +25,8 @@ test(
       await prisma.aiEvent.deleteMany();
       await prisma.dispute.deleteMany();
       await prisma.order.deleteMany();
+      await prisma.pushDevice.deleteMany();
+      await prisma.executorProfile.deleteMany();
       await prisma.session.deleteMany();
       await prisma.user.deleteMany();
       await prisma.serviceCatalog.deleteMany();
@@ -211,6 +213,27 @@ test(
       assert.equal(operatorLogin.statusCode, 200, operatorLogin.body);
       const operatorAuth = operatorLogin.json();
 
+      const activatedExecutor = await app.inject({
+        method: "PATCH",
+        url: `/operations/executors/${executorAuth.user.id}`,
+        headers: authHeaders(operatorAuth.token),
+        payload: {
+          verified: true,
+          active: true,
+          acceptingJobs: true,
+          serviceZones: ["ALMATY_CORE"]
+        }
+      });
+      assert.equal(activatedExecutor.statusCode, 200, activatedExecutor.body);
+
+      const heartbeat = await app.inject({
+        method: "POST",
+        url: "/executors/me/heartbeat",
+        headers: authHeaders(executorAuth.token)
+      });
+      assert.equal(heartbeat.statusCode, 200, heartbeat.body);
+      assert.equal(heartbeat.json().eligible, true);
+
       const created = await app.inject({
         method: "POST",
         url: "/orders",
@@ -223,6 +246,7 @@ test(
           rooms: 2,
           hasPets: false,
           urgent: false,
+          serviceZone: "ALMATY_CORE",
           scheduledAt: "2026-08-01T09:00:00.000Z"
         }
       });
@@ -230,24 +254,35 @@ test(
       const orderId = created.json().order.id as string;
       assert.equal(created.json().order.status, "PRICED");
 
-      const intent = await app.inject({
+      const confirmedAndAssigned = await app.inject({
         method: "POST",
-        url: "/payments/intent",
-        headers: {
-          ...authHeaders(clientAuth.token),
-          "idempotency-key": `e2e-${suffix}`
-        },
-        payload: { orderId, method: "kaspi_placeholder" }
-      });
-      assert.equal(intent.statusCode, 200, intent.body);
-
-      const confirmed = await app.inject({
-        method: "POST",
-        url: `/payments/${intent.json().payment.id}/confirm`,
+        url: `/orders/${orderId}/confirm-placeholder`,
         headers: authHeaders(clientAuth.token)
       });
-      assert.equal(confirmed.statusCode, 200, confirmed.body);
-      assert.equal(confirmed.json().order.status, "CONFIRMED");
+      assert.equal(confirmedAndAssigned.statusCode, 200, confirmedAndAssigned.body);
+      assert.equal(confirmedAndAssigned.json().order.status, "ASSIGNED");
+      assert.equal(confirmedAndAssigned.json().order.executorId, executorAuth.user.id);
+      assert.equal(confirmedAndAssigned.json().payment.status, "PAID");
+      assert.equal(confirmedAndAssigned.json().payment.kind, "CLIENT_KASPI_PLACEHOLDER");
+
+      const idempotentConfirm = await app.inject({
+        method: "POST",
+        url: `/orders/${orderId}/confirm-placeholder`,
+        headers: authHeaders(clientAuth.token)
+      });
+      assert.equal(idempotentConfirm.statusCode, 200, idempotentConfirm.body);
+      assert.equal(idempotentConfirm.json().order.status, "ASSIGNED");
+
+      const executorTasksOnSecondAccount = await app.inject({
+        method: "GET",
+        url: `/performer/tasks/${executorAuth.user.id}`,
+        headers: authHeaders(executorAuth.token)
+      });
+      assert.equal(executorTasksOnSecondAccount.statusCode, 200, executorTasksOnSecondAccount.body);
+      assert.ok(
+        executorTasksOnSecondAccount.json().some((order: { id: string }) => order.id === orderId),
+        "the assigned order must be visible to the executor account"
+      );
 
       const prematureExecutorProgress = await app.inject({
         method: "POST",
@@ -255,8 +290,8 @@ test(
         headers: authHeaders(executorAuth.token),
         payload: { status: "ACCEPTED" }
       });
-      assert.equal(prematureExecutorProgress.statusCode, 403, prematureExecutorProgress.body);
-      assert.equal(prematureExecutorProgress.json().error.code, "ORDER_EXECUTOR_REQUIRED");
+      assert.equal(prematureExecutorProgress.statusCode, 200, prematureExecutorProgress.body);
+      assert.equal(prematureExecutorProgress.json().order.status, "ACCEPTED");
 
       const clientPayoutAttempt = await app.inject({
         method: "POST",
@@ -266,15 +301,7 @@ test(
       assert.equal(clientPayoutAttempt.statusCode, 403, clientPayoutAttempt.body);
       assert.equal(clientPayoutAttempt.json().error.code, "ROLE_FORBIDDEN");
 
-      const assigned = await app.inject({
-        method: "POST",
-        url: `/orders/${orderId}/assign`,
-        headers: authHeaders(clientAuth.token)
-      });
-      assert.equal(assigned.statusCode, 200, assigned.body);
-      assert.equal(assigned.json().order.executorId, executorAuth.user.id);
-
-      for (const status of ["ACCEPTED", "IN_PROGRESS"]) {
+      for (const status of ["IN_PROGRESS"]) {
         const progressed = await app.inject({
           method: "POST",
           url: `/orders/${orderId}/status`,
@@ -292,6 +319,11 @@ test(
         payload: {
           orderId,
           executorId: executorAuth.user.id,
+          beforePhotoUri: "content://e2e/before.png",
+          beforePhotoBase64:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z6N8AAAAASUVORK5CYII=",
+          beforeFileName: "before.png",
+          beforeMimeType: "image/png",
           photoUri: "content://e2e/proof.png",
           photoBase64:
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z6N8AAAAASUVORK5CYII=",
@@ -303,6 +335,8 @@ test(
       });
       assert.equal(proof.statusCode, 200, proof.body);
       assert.equal(proof.json().order.status, "QUALITY_CHECK");
+      assert.equal(proof.json().qualityCheck.score, null);
+      assert.equal(proof.json().aiAnalysis.quality.data.manualReviewRequired, true);
 
       const executorQualityAttempt = await app.inject({
         method: "POST",

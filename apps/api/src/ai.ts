@@ -13,9 +13,12 @@ export type AiResult<T> = {
 };
 
 export type QualityVisionData = {
-  score: number;
+  score: number | null;
   confidence: number;
   summary: string;
+  manualReviewRequired: boolean;
+  improvementDetected: boolean | null;
+  beforeAfterSummary: string;
   detectedIssues: string[];
   reworkRecommended: boolean;
   checklistAssessment: Array<{
@@ -37,6 +40,8 @@ export type RiskAssessmentData = {
 
 export type DemandForecastData = {
   summary: string;
+  insufficientData: boolean;
+  historyOrders: number;
   days: Array<{
     date: string;
     predictedOrders: number;
@@ -68,6 +73,9 @@ const qualitySchema: JsonSchema = {
     "score",
     "confidence",
     "summary",
+    "manualReviewRequired",
+    "improvementDetected",
+    "beforeAfterSummary",
     "detectedIssues",
     "reworkRecommended",
     "checklistAssessment",
@@ -75,9 +83,22 @@ const qualitySchema: JsonSchema = {
     "riskSignals"
   ],
   properties: {
-    score: { type: "integer", minimum: 0, maximum: 100 },
+    score: {
+      anyOf: [
+        { type: "integer", minimum: 0, maximum: 100 },
+        { type: "null" }
+      ]
+    },
     confidence: { type: "number", minimum: 0, maximum: 1 },
     summary: { type: "string", minLength: 1, maxLength: 600 },
+    manualReviewRequired: { type: "boolean" },
+    improvementDetected: {
+      anyOf: [
+        { type: "boolean" },
+        { type: "null" }
+      ]
+    },
+    beforeAfterSummary: { type: "string", minLength: 1, maxLength: 600 },
     detectedIssues: {
       type: "array",
       maxItems: 12,
@@ -135,9 +156,18 @@ const riskSchema: JsonSchema = {
 const forecastSchema: JsonSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["summary", "days", "risks", "staffingRecommendations"],
+  required: [
+    "summary",
+    "insufficientData",
+    "historyOrders",
+    "days",
+    "risks",
+    "staffingRecommendations"
+  ],
   properties: {
     summary: { type: "string", minLength: 1, maxLength: 600 },
+    insufficientData: { type: "boolean" },
+    historyOrders: { type: "integer", minimum: 0, maximum: 100000000 },
     days: {
       type: "array",
       minItems: 1,
@@ -237,18 +267,19 @@ async function runStructured<T>(input: {
   images?: string[];
   safetyId: string;
   fallback: () => T;
+  forceFallbackWarning?: string;
 }): Promise<AiResult<T>> {
   const startedAt = Date.now();
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   const model = process.env.OPENAI_MODEL?.trim() || appConfig.openAiModel;
-  if (!apiKey) {
+  if (input.forceFallbackWarning || !apiKey) {
     return {
       mode: "FALLBACK",
       provider: "local-rules",
       model: "deterministic-v1",
       latencyMs: Date.now() - startedAt,
       data: input.fallback(),
-      warning: "OPENAI_API_KEY is not configured"
+      warning: input.forceFallbackWarning ?? "OPENAI_API_KEY is not configured"
     };
   }
 
@@ -346,25 +377,34 @@ export async function analyzeQualityVision(input: {
   checklist: string[];
   notes?: string;
   mediaType: string;
-  images: string[];
+  beforeImages: string[];
+  afterImages: string[];
 }) {
+  const images = [...input.beforeImages, ...input.afterImages];
   return runStructured<QualityVisionData>({
     name: "cleaning_quality_vision",
     safetyId: input.orderId,
     schema: qualitySchema,
-    images: input.images,
+    images,
     payload: {
       orderId: input.orderId,
       serviceTitle: input.serviceTitle,
       checklist: input.checklist,
       executorNotes: input.notes ?? "",
       mediaType: input.mediaType,
-      imageCount: input.images.length,
-      videoFrameStrategy: input.mediaType === "video/mp4" ? "representative frames" : "not applicable"
+      beforeImageCount: input.beforeImages.length,
+      afterImageCount: input.afterImages.length,
+      imageSequence:
+        "The first beforeImageCount images are BEFORE cleaning; all remaining images are AFTER cleaning.",
+      videoFrameStrategy:
+        input.mediaType === "video/mp4"
+          ? "six representative chronological frames per supplied video when available"
+          : "not applicable"
     },
     instructions: [
       "You are the AI Quality and AI Vision module for a cleaning service.",
-      "Inspect only visible evidence in the supplied photo or representative video frames.",
+      "Compare the BEFORE image group with the AFTER image group and inspect only visible evidence.",
+      "The payload states how many first images are BEFORE; all remaining images are AFTER.",
       "Evaluate cleanliness, remaining dirt, stains, clutter that blocks verification, image relevance, blur, darkness, and whether checklist claims are visibly supported.",
       "Never claim that an unseen room or surface is clean. Mark unverifiable checklist items UNCLEAR.",
       "A low-quality, irrelevant, duplicated, or insufficient report must lower confidence and may require rework.",
@@ -372,23 +412,25 @@ export async function analyzeQualityVision(input: {
       "Write all human-facing text in Russian."
     ].join(" "),
     fallback: () => {
-      const visible = input.images.length > 0;
-      const score = Math.min(100, 58 + input.checklist.length * 6 + (visible ? 12 : 0));
+      const hasPair = input.beforeImages.length > 0 && input.afterImages.length > 0;
       return {
-        score,
-        confidence: visible ? 0.35 : 0.1,
-        summary: visible
-          ? "OpenAI недоступен: применена чек-листовая резервная оценка без анализа содержимого изображения."
-          : "Нет доступных кадров для визуальной проверки; требуется ручная проверка.",
-        detectedIssues: visible ? [] : ["Визуальные материалы недоступны для анализа"],
-        reworkRecommended: !visible || score < 75,
+        score: null,
+        confidence: 0,
+        summary: "AI Vision недоступен: числовая оценка не выставлена, требуется ручная проверка менеджером качества.",
+        manualReviewRequired: true,
+        improvementDetected: null,
+        beforeAfterSummary: hasPair
+          ? "Материалы «до» и «после» сохранены, но их содержимое не было проанализировано."
+          : "Полная пара материалов «до/после» отсутствует или не была проанализирована.",
+        detectedIssues: ["Автоматический визуальный анализ не завершён"],
+        reworkRecommended: true,
         checklistAssessment: input.checklist.map((item) => ({
           item,
           status: "UNCLEAR" as const,
           evidence: "Содержимое не анализировалось в резервном режиме"
         })),
-        recommendations: ["Менеджеру качества необходимо вручную просмотреть фото или видео"],
-        riskSignals: visible ? ["AI Vision работает в резервном режиме"] : ["Нет кадров для проверки"]
+        recommendations: ["Менеджеру качества необходимо вручную просмотреть материалы «до/после»"],
+        riskSignals: ["AI Vision завершился без результата"]
       };
     }
   });
@@ -488,11 +530,17 @@ export async function forecastDemand(input: {
   activeExecutors: number;
   currentActiveOrders: number;
 }) {
+  const historyOrders = input.dailyOrders.reduce((sum, day) => sum + day.orders, 0);
+  const nonEmptyHistoryDays = input.dailyOrders.filter((day) => day.orders > 0).length;
+  const insufficientData = historyOrders < 30 || nonEmptyHistoryDays < 14;
   return runStructured<DemandForecastData>({
     name: "cleaning_demand_forecast",
     safetyId: `forecast-${isoDate(new Date())}`,
     schema: forecastSchema,
     payload: input,
+    forceFallbackWarning: insufficientData
+      ? `INSUFFICIENT_HISTORY: ${historyOrders} orders across ${nonEmptyHistoryDays} active days`
+      : undefined,
     instructions: [
       "You are the demand forecasting module for a cleaning service.",
       "Forecast each requested future date from the supplied daily history.",
@@ -530,9 +578,13 @@ export async function forecastDemand(input: {
       });
       const peak = Math.max(0, ...days.map((day) => day.recommendedExecutors));
       return {
-        summary: "Прогноз рассчитан резервной моделью среднего спроса и дня недели.",
+        summary: insufficientData
+          ? "Недостаточно истории для надёжного прогноза. Показан только ориентировочный диапазон, его нельзя использовать для автоматического планирования смен."
+          : "Прогноз рассчитан резервной моделью среднего спроса и дня недели.",
+        insufficientData,
+        historyOrders,
         days,
-        risks: input.dailyOrders.length < 14 ? ["Недостаточно истории для устойчивого прогноза"] : [],
+        risks: insufficientData ? ["Недостаточно истории для устойчивого прогноза"] : [],
         staffingRecommendations: [
           peak > input.activeExecutors
             ? `На пике потребуется ещё ${peak - input.activeExecutors} исполнителей`
