@@ -26,3 +26,12 @@ test("the MVP migration contains required state, audit, dispute and idempotency 
     assert.match(sql, new RegExp(requiredStatement.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 });
+
+test("database seed cannot publish a fixed password or create demo users in production", async () => {
+  const seed = await readFile(new URL("../prisma/seed.ts", import.meta.url), "utf8");
+
+  assert.doesNotMatch(seed, /password1/);
+  assert.match(seed, /SEED_DEMO_PASSWORD/);
+  assert.match(seed, /NODE_ENV === "production"/);
+  assert.match(seed, /Demo users cannot be seeded in production/);
+});

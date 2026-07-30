@@ -11,7 +11,10 @@ function hashPassword(password: string) {
 }
 
 async function main() {
-  const demoPasswordHash = hashPassword("password1");
+  const seedDemoUsers = process.env.SEED_DEMO_USERS === "true";
+  if (seedDemoUsers && process.env.NODE_ENV === "production") {
+    throw new Error("Demo users cannot be seeded in production");
+  }
 
   for (const service of mvpCleaningServices) {
     await prisma.serviceCatalog.upsert({
@@ -31,6 +34,13 @@ async function main() {
       }
     });
   }
+
+  if (!seedDemoUsers) return;
+  const demoPassword = process.env.SEED_DEMO_PASSWORD;
+  if (!demoPassword || demoPassword.length < 12) {
+    throw new Error("SEED_DEMO_PASSWORD with at least 12 characters is required");
+  }
+  const demoPasswordHash = hashPassword(demoPassword);
 
   await prisma.user.upsert({
     where: { email: "client@ai-cleaning.local" },

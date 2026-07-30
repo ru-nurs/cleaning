@@ -32,6 +32,10 @@ npm run db:seed
 npm run dev
 ```
 
+По умолчанию seed обновляет только каталог услуг. Локальные demo-аккаунты создаются только при
+`SEED_DEMO_USERS=true` и пароле `SEED_DEMO_PASSWORD` длиной не менее 12 символов. При
+`NODE_ENV=production` создание demo-пользователей запрещено.
+
 API будет доступен на `http://localhost:4000`, проверка состояния — `GET /health`.
 
 ## Проверка
